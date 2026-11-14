@@ -47,6 +47,8 @@ Options:
   --muted --deafened   start muted (nothing sent) or deafened (nothing played)
   --play FILE          send this recording (48 kHz mono float WAV, as --record
                        writes) instead of the mic, looped; uses no audio devices
+  --raw                with --play: the file is raw mic audio (mic-raw.wav); process
+                       and gate it as the mic would be (--mode, --no-aec...)
   --duration SECS      quit after this long";
 
 struct Args {
@@ -63,6 +65,8 @@ struct Args {
     deafened: bool,
     duration: Option<Duration>,
     play: Option<std::path::PathBuf>,
+    /// The --play file is raw mic audio, to be processed as the mic would be.
+    raw: bool,
     engine: EngineConfig,
 }
 
@@ -101,6 +105,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
         deafened: false,
         duration: None,
         play: None,
+        raw: false,
         engine: EngineConfig::default(),
     };
     let mut parser = lexopt::Parser::from_env();
@@ -139,6 +144,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("audio-host") => args.engine.host = Some(parser.value()?.string()?),
             Long("record") => args.engine.record_to = Some(parser.value()?.into()),
             Long("play") => args.play = Some(parser.value()?.into()),
+            Long("raw") => args.raw = true,
             Long("help") | Short('h') => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -503,13 +509,19 @@ async fn play(args: Args) -> Result<()> {
     });
     let duration = args.duration;
     let frames_per_packet = args.engine.encoder.frames_per_packet;
+    // A processed recording is already what a client would send; a raw one
+    // goes through the mic's processing and gate.
+    let (processing, mode) = if args.raw {
+        (args.engine.processing, args.engine.mode)
+    } else {
+        (Processing::NONE, TransmitMode::Continuous)
+    };
     log::info!("Playing {}; Ctrl-C to quit", path.display());
 
     let sending = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut capture = Capture::new(
-            // It is already what a client would send.
-            Processing::NONE,
-            TransmitMode::Continuous,
+            processing,
+            mode,
             EncoderConfig {
                 frames_per_packet,
                 ..Default::default()
