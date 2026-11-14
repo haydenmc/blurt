@@ -46,7 +46,7 @@ fn main() {
         (
             "+ noise suppression",
             Processing {
-                noise_suppression: NoiseSuppression::High,
+                noise_suppression: NoiseSuppression::Rnnoise,
                 ..none
             },
         ),
@@ -59,9 +59,9 @@ fn main() {
         ),
         ("everything (default)", all),
         (
-            "everything, RNNoise",
+            "everything, WebRTC High",
             Processing {
-                noise_suppression: NoiseSuppression::Rnnoise,
+                noise_suppression: NoiseSuppression::High,
                 ..all
             },
         ),

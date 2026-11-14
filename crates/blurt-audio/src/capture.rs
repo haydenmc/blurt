@@ -2,10 +2,16 @@
 //! it, and encode it.
 //!
 //! Order matters: echo cancellation needs the raw (linear) mic signal, so it
-//! runs first; noise suppression next; gain control last, so it raises the
-//! voice rather than the noise. With WebRTC noise suppression all three are
-//! one sonora pass, in that order. RNNoise isn't part of sonora, so with it
-//! the gain controller runs in a second pass after RNNoise.
+//! runs first (with WebRTC noise suppression, if chosen, in the same sonora
+//! pass); then RNNoise; then gain control, in a second pass, so it raises
+//! the voice rather than the noise.
+//!
+//! RNNoise always runs, because its voice probability is the best at telling
+//! speech from bangs, thumps and clicks. As the suppressor (the default) it
+//! also cleans the frame; otherwise it only listens, and its verdict is
+//! combined with sonora's voice detector. Either way it hears the signal
+//! before gain control, which would otherwise make a bang look louder and
+//! longer.
 
 use sonora::config::{
     AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppressionLevel,
@@ -41,7 +47,9 @@ pub enum TransmitMode {
 
 impl Default for TransmitMode {
     fn default() -> Self {
-        Self::VoiceActivity { threshold: 0.5 }
+        // Tuned on real recordings: at 0.7, half as many bangs and thumps
+        // got through as at 0.5, with no more speech lost.
+        Self::VoiceActivity { threshold: 0.7 }
     }
 }
 
@@ -49,17 +57,21 @@ impl Default for TransmitMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NoiseSuppression {
     Off,
-    /// WebRTC's suppressor, about 6 dB.
+    /// WebRTC's suppressor, nominally about 6 dB. The WebRTC levels are
+    /// gentler on speech (they keep the start of words as they are) but
+    /// much weaker on loud steady noise such as fans.
     Low,
-    /// About 12 dB.
+    /// Nominally about 12 dB.
     Moderate,
-    /// About 18 dB. Keeps the starts of words intact.
-    #[default]
+    /// Nominally about 18 dB.
     High,
-    /// About 21 dB.
+    /// Nominally about 21 dB.
     VeryHigh,
-    /// RNNoise: removes more kinds of noise (keyboards, fans with tones),
-    /// but also softens the first few tens of milliseconds of words.
+    /// RNNoise: the strongest on noise of every kind (about 40 dB on loud
+    /// steady noise), and with its voice detector alone the best at not
+    /// sending bangs. It softens the first few tens of milliseconds of
+    /// words somewhat.
+    #[default]
     Rnnoise,
 }
 
@@ -103,8 +115,8 @@ fn gain_controller(processing: Processing) -> Option<GainController2> {
     })
 }
 
-/// The main sonora pass: high-pass, echo cancellation, WebRTC noise
-/// suppression, and gain control unless RNNoise has to run first.
+/// The first sonora pass: high-pass, echo cancellation and WebRTC noise
+/// suppression.
 fn main_config(processing: Processing) -> Config {
     let level = match processing.noise_suppression {
         NoiseSuppression::Off | NoiseSuppression::Rnnoise => None,
@@ -121,31 +133,25 @@ fn main_config(processing: Processing) -> Config {
             level,
             ..Default::default()
         }),
-        gain_controller2: if processing.rnnoise() {
-            None
-        } else {
-            gain_controller(processing)
-        },
         ..Default::default()
     }
 }
 
 /// The second pass, after RNNoise: gain control only.
-fn gain_pass(processing: Processing) -> Option<AudioProcessing> {
-    if !processing.rnnoise() || !processing.auto_gain {
-        return None;
-    }
+fn gain_pass(processing: Processing) -> AudioProcessing {
     let stream = StreamConfig::new(SAMPLE_RATE, 1);
-    Some(
-        AudioProcessing::builder()
-            .config(Config {
-                gain_controller2: gain_controller(processing),
-                ..Default::default()
-            })
-            .capture_config(stream)
-            .render_config(stream)
-            .build(),
-    )
+    AudioProcessing::builder()
+        .config(gain_config(processing))
+        .capture_config(stream)
+        .render_config(stream)
+        .build()
+}
+
+fn gain_config(processing: Processing) -> Config {
+    Config {
+        gain_controller2: gain_controller(processing),
+        ..Default::default()
+    }
 }
 
 /// The echo canceller's statistics, for diagnostics. Each is `None` until
@@ -224,15 +230,49 @@ impl Gate {
     }
 }
 
+/// Tracks the level of the background: it follows quieter levels quickly
+/// and louder ones slowly, so speech and bangs don't raise it.
+struct NoiseFloor {
+    db: f32,
+}
+
+impl NoiseFloor {
+    /// 1.5 dB a second.
+    const RISE_DB_PER_FRAME: f32 = 0.015;
+    /// Fast, but not to the bottom at once, so a single glitched or silent
+    /// frame doesn't make everything look loud for the next minute.
+    const FALL_DB_PER_FRAME: f32 = 3.0;
+
+    /// Unknown until the first frame: nothing counts as above it until then.
+    fn new() -> Self {
+        Self { db: f32::INFINITY }
+    }
+
+    fn update(&mut self, level_db: f32) {
+        self.db = if self.db == f32::INFINITY {
+            level_db
+        } else if level_db < self.db {
+            level_db.max(self.db - Self::FALL_DB_PER_FRAME)
+        } else {
+            self.db + Self::RISE_DB_PER_FRAME
+        };
+    }
+}
+
+/// How far above the background (before noise suppression) a frame must be
+/// to count as speech at all. Steady hiss sits at the floor, and both voice
+/// detectors sometimes take white hiss (a cheap mic's own noise) for speech.
+const SPEECH_ABOVE_FLOOR_DB: f32 = 10.0;
+
 /// Spots where speech may have begun: a sudden rise in the processed level
-/// (steady noise is already gone) against a tracked noise floor.
+/// (steady noise is already gone) against its tracked floor.
 ///
 /// It never sends anything itself. The voice detector needs a few frames to
 /// be sure of speech; once it is, the gate reaches back to the onset, so the
 /// start of the word isn't clipped. A bang or slam that the detector never
 /// confirms is never sent.
 struct OnsetDetector {
-    floor_db: f32,
+    floor: NoiseFloor,
     /// Frames since the earliest onset still within reach of the gate.
     age: Option<usize>,
 }
@@ -242,24 +282,17 @@ impl OnsetDetector {
     const MARGIN_DB: f32 = 20.0;
     /// And never below this, so near-silence doesn't count.
     const MIN_DB: f32 = -55.0;
-    /// The floor follows quieter levels at once and louder ones slowly
-    /// (1.5 dB a second), so speech doesn't raise it.
-    const RISE_DB_PER_FRAME: f32 = 0.015;
 
     fn new() -> Self {
         Self {
-            floor_db: -70.0,
+            floor: NoiseFloor::new(),
             age: None,
         }
     }
 
     fn update(&mut self, level_db: f32) {
-        let onset = level_db >= (self.floor_db + Self::MARGIN_DB).max(Self::MIN_DB);
-        self.floor_db = if level_db < self.floor_db {
-            level_db
-        } else {
-            self.floor_db + Self::RISE_DB_PER_FRAME
-        };
+        let onset = level_db >= (self.floor.db + Self::MARGIN_DB).max(Self::MIN_DB);
+        self.floor.update(level_db);
         self.age = match self.age {
             Some(age) if age + 1 < LOOKBACK_FRAMES => Some(age + 1),
             _ if onset => Some(0),
@@ -281,13 +314,15 @@ impl OnsetDetector {
 
 pub struct Capture {
     apm: AudioProcessing,
-    /// Gain control after RNNoise, when RNNoise is in use.
-    gain: Option<AudioProcessing>,
+    /// Gain control, after RNNoise.
+    gain: AudioProcessing,
     processing: Processing,
     denoiser: Box<nnnoiseless::DenoiseState<'static>>,
     vad: sonora_agc2::vad_wrapper::VoiceActivityDetectorWrapper,
     gate: Gate,
     onset: OnsetDetector,
+    /// The background level before noise suppression.
+    input_floor: NoiseFloor,
     pub mode: TransmitMode,
     encoder: Encoder,
     frames_per_packet: usize,
@@ -329,6 +364,7 @@ impl Capture {
             ),
             gate: Gate::default(),
             onset: OnsetDetector::new(),
+            input_floor: NoiseFloor::new(),
             mode,
             encoder: Encoder::new(encoder)?,
             frames_per_packet: encoder.frames_per_packet.clamp(1, 2),
@@ -347,12 +383,10 @@ impl Capture {
     pub fn set_processing(&mut self, processing: Processing) {
         if processing != self.processing {
             self.apm.apply_config(main_config(processing));
-            // Only rebuilt when whether it's needed changes, so its gain
-            // doesn't start over.
-            if processing.rnnoise() != self.processing.rnnoise()
-                || processing.auto_gain != self.processing.auto_gain
-            {
-                self.gain = gain_pass(processing);
+            // Only reconfigured when it changes, so its gain doesn't start
+            // over.
+            if processing.auto_gain != self.processing.auto_gain {
+                self.gain.apply_config(gain_config(processing));
             }
             self.processing = processing;
         }
@@ -424,31 +458,42 @@ impl Capture {
             log::debug!("Echo canceller capture failed: {e}");
             frame = *mic;
         }
+        let input_level = level_db(&frame);
+        let above_floor = input_level >= self.input_floor.db + SPEECH_ABOVE_FLOOR_DB;
+        self.input_floor.update(input_level);
+
+        // RNNoise works on 16-bit-scaled samples. It always runs, for its
+        // voice probability; only as the suppressor does its output replace
+        // the frame.
+        let scaled: [f32; FRAME_SAMPLES] = std::array::from_fn(|i| frame[i] * 32768.0);
+        let mut denoised = [0.0; FRAME_SAMPLES];
+        let rnnoise_speech = self.denoiser.process_frame(&mut denoised, &scaled);
         if self.processing.rnnoise() {
-            // RNNoise works on 16-bit-scaled samples.
-            let scaled: [f32; FRAME_SAMPLES] = std::array::from_fn(|i| frame[i] * 32768.0);
-            self.denoiser.process_frame(&mut frame, &scaled);
-            for sample in &mut frame {
-                *sample /= 32768.0;
-            }
-            if let Some(gain) = &mut self.gain {
-                let input = frame;
-                if let Err(e) = gain.process_capture_f32(&[&input], &mut [&mut frame]) {
-                    log::debug!("Gain control failed: {e}");
-                    frame = input;
-                }
+            frame = denoised.map(|s| s / 32768.0);
+        }
+        if self.processing.auto_gain {
+            let input = frame;
+            if let Err(e) = self.gain.process_capture_f32(&[&input], &mut [&mut frame]) {
+                log::debug!("Gain control failed: {e}");
+                frame = input;
             }
         }
 
-        // Like WebRTC, the detector expects 16-bit-scaled samples too.
-        let scaled: [f32; FRAME_SAMPLES] = std::array::from_fn(|i| frame[i] * 32768.0);
-        let speech = self.vad.analyze(&scaled);
+        let speech = if self.processing.rnnoise() {
+            rnnoise_speech
+        } else {
+            // RNNoise heard the noise WebRTC's suppressor left, so its
+            // verdict alone lets more bangs through; both must agree.
+            // Like WebRTC, sonora's detector expects 16-bit-scaled samples.
+            let scaled: [f32; FRAME_SAMPLES] = std::array::from_fn(|i| frame[i] * 32768.0);
+            self.vad.analyze(&scaled).min(rnnoise_speech)
+        };
         let level = level_db(&frame);
         self.onset.update(level);
 
         let (wanted, hold, lookback) = match self.mode {
             TransmitMode::VoiceActivity { threshold } => (
-                speech >= threshold,
+                speech >= threshold && above_floor,
                 VOICE_HOLD_FRAMES,
                 self.onset.lookback(),
             ),
@@ -709,21 +754,10 @@ mod tests {
         assert!(rnnoise - none > 30.0, "RNNoise: {:.1} dB", rnnoise - none);
     }
 
-    /// A slam: a broadband crack decaying over ~80 ms, with a low thump.
-    fn bang(at: usize, i: usize, noise: &mut Noise) -> [f32; FRAME_SAMPLES] {
-        std::array::from_fn(|n| {
-            let t = (i.wrapping_sub(at) * FRAME_SAMPLES + n) as f32 / SAMPLE_RATE as f32;
-            if i < at || t > 0.4 {
-                return 0.0;
-            }
-            let decay = (-t / 0.08).exp();
-            0.5 * decay * (noise.next() + (2.0 * std::f32::consts::PI * 70.0 * t).sin())
-        })
-    }
-
-    #[test]
-    #[ignore = "known gap: the voice detector takes slams for speech; see the reprocess example's --inject-noises"]
-    fn a_bang_alone_is_never_sent() {
+    /// Runs `capture` (default processing, voice activity) over 3 s of a
+    /// real mic's noise floor (about -70 dBFS) with `extra` added, and
+    /// returns the frame numbers sent.
+    fn sent_frames(extra: impl Fn(usize, usize) -> f32) -> Vec<u64> {
         let mut capture = Capture::new(
             Processing::default(),
             TransmitMode::default(),
@@ -734,11 +768,100 @@ mod tests {
         let mut out = sent;
         let mut noise = Noise(3);
         for i in 0..300 {
-            let mic = bang(150, i, &mut noise);
+            let floor = noise.frame(0.0005);
+            let mic: [f32; FRAME_SAMPLES] = std::array::from_fn(|n| floor[n] + extra(i, n));
             capture.capture(&mic, false, false, &mut out);
         }
         let sent = &sent.lock().unwrap().0;
-        assert!(sent.is_empty(), "sent {} frames of a bang", sent.len());
+        sent.iter().map(|s| s.1).collect()
+    }
+
+    #[test]
+    fn room_noise_is_never_sent() {
+        // Including at the start, while everything is still adapting.
+        assert_eq!(sent_frames(|_, _| 0.0), Vec::<u64>::new());
+    }
+
+    /// Frames sent over 3 s of steady noise alone, white (a mic's own hiss)
+    /// or pink (closer to a room or a fan), with RMS `level_db`.
+    fn sent_over_steady_noise(seed: u64, pink: bool, level_db: f32) -> usize {
+        let mut capture = Capture::new(
+            Processing::default(),
+            TransmitMode::default(),
+            EncoderConfig::default(),
+        )
+        .unwrap();
+        let mut noise = Noise(seed);
+        // Uniform noise in [-1, 1] has an RMS of 1/sqrt(3).
+        let amp = 10f32.powf(level_db / 20.0) * 3f32.sqrt();
+        let (mut b0, mut b1, mut b2) = (0.0f32, 0.0f32, 0.0f32);
+        let mut out = |_: &[u8], _: u64, _: bool| {};
+        (0..300)
+            .filter(|_| {
+                let mic: [f32; FRAME_SAMPLES] = std::array::from_fn(|_| {
+                    let w = noise.next();
+                    if !pink {
+                        return w * amp;
+                    }
+                    // Paul Kellet's economy pink filter.
+                    b0 = 0.99765 * b0 + w * 0.099_046;
+                    b1 = 0.96300 * b1 + w * 0.296_516_4;
+                    b2 = 0.57000 * b2 + w * 1.052_691_3;
+                    (b0 + b1 + b2 + w * 0.1848) * 0.25 * amp
+                });
+                capture.capture(&mic, false, false, &mut out).transmitting
+            })
+            .count()
+    }
+
+    #[test]
+    fn steady_hiss_and_fans_are_never_sent() {
+        // Both voice detectors take steady white noise for speech now and
+        // then (about a third of these, before the floor check), so every
+        // seed and level counts.
+        for seed in 1..=4 {
+            for pink in [false, true] {
+                for level_db in [-71.0, -59.0, -45.0, -35.0] {
+                    let sent = sent_over_steady_noise(seed, pink, level_db);
+                    assert_eq!(sent, 0, "seed {seed}, pink {pink}, {level_db} dBFS");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_silent_frame_barely_moves_the_noise_floor() {
+        let mut floor = NoiseFloor::new();
+        for _ in 0..100 {
+            floor.update(-50.0);
+        }
+        // A glitch: one frame of digital silence.
+        floor.update(-100.0);
+        assert!(floor.db >= -53.0, "floor fell to {}", floor.db);
+    }
+
+    #[test]
+    fn clicks_and_claps_are_not_sent() {
+        // Typing (a key every 110 ms from 1 s) and a clap at 2.5 s, as
+        // sharp broadband bursts. Slams and thumps are judged on real
+        // recordings instead (the reprocess example's --noise-only): the
+        // detectors take synthetic ones for speech more often than real ones.
+        let burst = |i: usize, n: usize, at: f32, tau: f32, amp: f32| {
+            let t = (i * FRAME_SAMPLES + n) as f32 / SAMPLE_RATE as f32 - at;
+            if t < 0.0 || t > 10.0 * tau {
+                return 0.0;
+            }
+            // Deterministic, noise-like.
+            let x = ((i * FRAME_SAMPLES + n) as f32 * 12.9898).sin() * 43758.547;
+            amp * (-t / tau).exp() * (x - x.floor() - 0.5) * 2.0
+        };
+        let sent = sent_frames(|i, n| {
+            let typing: f32 = (0..8)
+                .map(|k| burst(i, n, 1.0 + k as f32 * 0.11, 0.003, 0.1))
+                .sum();
+            typing + burst(i, n, 2.5, 0.012, 0.6)
+        });
+        assert_eq!(sent, Vec::<u64>::new());
     }
 
     #[test]

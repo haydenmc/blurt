@@ -10,6 +10,8 @@
 //!   --vad-threshold P           voice activity threshold (default 0.5)
 //!   --inject-noises             add slams, thumps, claps, typing and drops to
 //!                               the silences, and report how much was sent
+//!   --noise-only                the recording has no speech: list each sound
+//!                               and how much of it was sent
 //!   --repeat N                  play the recording N times, scoring the last
 //!                               (to see where adaptation settles)
 //!   --far-end-shift SECS        shift the playback, to simulate someone else
@@ -37,6 +39,7 @@ fn main() {
     let mut shift_secs: f64 = 0.0;
     let mut repeat = 1;
     let mut inject = false;
+    let mut noise_only = false;
     let mut mode = TransmitMode::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -61,6 +64,7 @@ fn main() {
                 }
             }
             "--inject-noises" => inject = true,
+            "--noise-only" => noise_only = true,
             "--repeat" => repeat = args.next().expect("--repeat N").parse().unwrap(),
             "--far-end-shift" => {
                 shift_secs = args.next().expect("--far-end-shift SECS").parse().unwrap()
@@ -93,12 +97,14 @@ fn main() {
     let mut sent = Vec::with_capacity(frames * FRAME_SAMPLES);
     let mut sink = |_: &[u8], _: u64, _: bool| {};
     let mut backlogs = Vec::new();
+    let mut speech_probs: Vec<f32> = Vec::new();
     for i in 0..frames * repeat {
         let span = i * FRAME_SAMPLES..(i + 1) * FRAME_SAMPLES;
         let play: &[f32; FRAME_SAMPLES] = playback[span.clone()].try_into().unwrap();
         let mic: &[f32; FRAME_SAMPLES] = raw_all[span].try_into().unwrap();
         capture.render(play);
         let report = capture.capture(mic, false, false, &mut sink);
+        speech_probs.push(report.speech);
         processed.extend_from_slice(capture.processed());
         if report.transmitting {
             sent.extend_from_slice(capture.processed());
@@ -202,6 +208,39 @@ fn main() {
         backlogs.get(backlogs.len() / 2).map_or(0, |&b| added(b)),
         backlogs.last().map_or(0, |&b| added(b)),
     );
+    if noise_only {
+        // No speech in the recording: every sound event is a noise, and
+        // anything sent is a false positive.
+        let base = frames * (repeat - 1);
+        let mut total = 0;
+        let mut leaked = 0;
+        let mut n = 0;
+        println!(
+            "  {:>7} {:>6} {:>8} {:>10} {:>8}",
+            "start s", "len ms", "peak dB", "max speech", "sent ms"
+        );
+        for (start, end) in utterances_in(&raw_db, floor + 15.0) {
+            n += 1;
+            let peak = raw_db[start..end].iter().copied().fold(-100.0, f32::max);
+            let window = start..(end + 30).min(frames);
+            let max_speech = window
+                .clone()
+                .map(|f| speech_probs[base + f])
+                .fold(0.0, f32::max);
+            let sent_ms = window.filter(|&f| sent_db[f] > -90.0).count() * 10;
+            total += sent_ms;
+            leaked += usize::from(sent_ms > 0);
+            println!(
+                "  {:7.2} {:6} {:8.1} {:10.2} {:8}",
+                start as f64 / 100.0,
+                (end - start) * 10,
+                peak,
+                max_speech,
+                sent_ms
+            );
+        }
+        println!("  {leaked}/{n} noises sent, {total} ms in all");
+    }
     if !events.is_empty() {
         let mut by_kind: Vec<(Noise, usize, usize, usize, usize)> = Vec::new();
         for &(kind, at) in &events {
