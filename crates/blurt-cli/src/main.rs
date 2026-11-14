@@ -241,6 +241,29 @@ async fn open(args: &Args) -> Result<Connection> {
 /// Received voice, straight from the connection.
 struct NetworkVoice(tokio::sync::mpsc::Receiver<mumble_protocol::raw_udp::Audio>);
 
+/// Feeds the engine received voice, waking it for each packet so none waits
+/// for the next device callback. Returns the engine's end of the channel;
+/// call the returned function with the engine's waker once it has started.
+fn forward_voice(
+    mut from: tokio::sync::mpsc::Receiver<mumble_protocol::raw_udp::Audio>,
+) -> (NetworkVoice, impl FnOnce(blurt_audio::Waker)) {
+    // A second of 10 ms packets from a few speakers; more means the engine
+    // has stopped reading.
+    let (tx, rx) = tokio::sync::mpsc::channel(512);
+    let start = move |waker: blurt_audio::Waker| {
+        tokio::spawn(async move {
+            while let Some(audio) = from.recv().await {
+                if tx.try_send(audio).is_err() {
+                    log::debug!("Audio engine isn't keeping up; dropped a voice packet");
+                }
+                waker.wake();
+            }
+            // Dropping `tx` closes the engine's source, which stops it.
+        });
+    };
+    (NetworkVoice(rx), start)
+}
+
 impl VoiceSource for NetworkVoice {
     fn try_recv(&mut self) -> Result<Option<IncomingVoice>, Closed> {
         use tokio::sync::mpsc::error::TryRecvError;
@@ -277,11 +300,13 @@ fn network_sink(
 async fn talk(args: Args) -> Result<()> {
     let connection = open(&args).await?;
     let client = connection.client.clone();
+    let (voice, start_forwarding) = forward_voice(connection.audio);
     let engine = Engine::start(
         args.engine.clone(),
-        NetworkVoice(connection.audio),
+        voice,
         network_sink(client.clone(), args.loopback),
     )?;
+    start_forwarding(engine.waker());
     engine.set_muted(args.muted);
     engine.set_deafened(args.deafened);
     if args.muted {
