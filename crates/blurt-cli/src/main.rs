@@ -35,8 +35,8 @@ Options:
   --device-buffer N    device buffer in frames at the device rate (default 240)
   --no-aec --no-ns --no-agc
                        turn off echo cancellation, noise suppression, gain
-  --ns KIND            noise suppression: off, low, moderate, high (default),
-                       veryhigh or rnnoise
+  --ns KIND            noise suppression: rnnoise (default), off, low, moderate,
+                       high or veryhigh
   --loopback           send our voice back to ourselves through the server
   --audio-host NAME    PipeWire, PulseAudio, ALSA... (default: the preferred one;
                        see `blurt-cli devices`)
