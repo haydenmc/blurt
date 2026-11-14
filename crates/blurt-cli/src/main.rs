@@ -45,6 +45,8 @@ Options:
   --stats              print engine stats every second
   --record DIR         record mic (raw, processed), sent and played audio as WAVs
   --muted --deafened   start muted (nothing sent) or deafened (nothing played)
+  --play FILE          send this recording (48 kHz mono float WAV, as --record
+                       writes) instead of the mic, looped; uses no audio devices
   --duration SECS      quit after this long";
 
 struct Args {
@@ -60,6 +62,7 @@ struct Args {
     muted: bool,
     deafened: bool,
     duration: Option<Duration>,
+    play: Option<std::path::PathBuf>,
     engine: EngineConfig,
 }
 
@@ -97,6 +100,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
         muted: false,
         deafened: false,
         duration: None,
+        play: None,
         engine: EngineConfig::default(),
     };
     let mut parser = lexopt::Parser::from_env();
@@ -134,6 +138,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("output") => args.engine.output_device = Some(parser.value()?.string()?),
             Long("audio-host") => args.engine.host = Some(parser.value()?.string()?),
             Long("record") => args.engine.record_to = Some(parser.value()?.into()),
+            Long("play") => args.play = Some(parser.value()?.into()),
             Long("help") | Short('h') => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -168,6 +173,7 @@ async fn main() -> ExitCode {
     };
     let result = match args.command {
         Command::Devices => list_devices(args.engine.host.as_deref()),
+        Command::Talk if args.play.is_some() => play(args).await,
         Command::Talk => talk(args).await,
         Command::Measure => measure(args).await,
     };
@@ -473,4 +479,96 @@ async fn measure(args: Args) -> Result<()> {
         ms(sorted[sorted.len() - 1]),
     );
     Ok(())
+}
+
+/// Sends a recording as our voice, in real time and looped, as a stand-in
+/// for someone else talking. Plays nothing.
+async fn play(args: Args) -> Result<()> {
+    let path = args.play.clone().expect("only called with --play");
+    let samples = read_wav(&path)?;
+    if samples.len() < FRAME_SAMPLES {
+        return Err(format!("{}: no audio", path.display()).into());
+    }
+    let connection = open(&args).await?;
+    let client = connection.client.clone();
+    // Not deafened: Mumble mutes the deafened, and the server would drop
+    // what we send. What others say is counted and thrown away.
+    let mut incoming = connection.audio;
+    let heard = tokio::spawn(async move {
+        let mut packets = 0u64;
+        while incoming.recv().await.is_some() {
+            packets += 1;
+        }
+        packets
+    });
+    let duration = args.duration;
+    let frames_per_packet = args.engine.encoder.frames_per_packet;
+    log::info!("Playing {}; Ctrl-C to quit", path.display());
+
+    let sending = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut capture = Capture::new(
+            // It is already what a client would send.
+            Processing::NONE,
+            TransmitMode::Continuous,
+            EncoderConfig {
+                frames_per_packet,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut sink = network_sink(client, false);
+        let frames = samples.as_chunks::<FRAME_SAMPLES>().0;
+        let start = Instant::now();
+        for (n, frame) in frames.iter().cycle().enumerate() {
+            let at = Duration::from_millis(10 * n as u64);
+            if duration.is_some_and(|d| at >= d) {
+                break;
+            }
+            std::thread::sleep((start + at).saturating_duration_since(Instant::now()));
+            capture.capture(frame, false, false, &mut sink);
+        }
+        Ok(())
+    });
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        result = sending => result??,
+    }
+    connection.client.disconnect();
+    if let Ok(packets) = tokio::time::timeout(Duration::from_secs(1), heard).await {
+        log::info!("Heard {} voice packets from others", packets.unwrap_or(0));
+    }
+    Ok(())
+}
+
+/// Reads a 48 kHz mono 32-bit float WAV.
+fn read_wav(path: &std::path::Path) -> Result<Vec<f32>> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bad = || format!("{}: not a 48 kHz mono float WAV", path.display());
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(bad().into());
+    }
+    let mut at = 12;
+    let mut format_ok = false;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &bytes[at + 8..(at + 8 + len).min(bytes.len())];
+        if id == b"fmt " && body.len() >= 16 {
+            let word = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+            let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            format_ok = word(0) == 3 && word(2) == 1 && rate == 48_000 && word(14) == 32;
+        } else if id == b"data" {
+            if !format_ok {
+                return Err(bad().into());
+            }
+            return Ok(body
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect());
+        }
+        at += 8 + len + (len & 1);
+    }
+    Err(bad().into())
 }
