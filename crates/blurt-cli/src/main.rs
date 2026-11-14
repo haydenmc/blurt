@@ -41,6 +41,7 @@ Options:
   --input ID --output ID
                        devices to use (see `blurt-cli devices`)
   --stats              print engine stats every second
+  --record DIR         record mic (raw, processed), sent and played audio as WAVs
   --muted --deafened   start muted (nothing sent) or deafened (nothing played)
   --duration SECS      quit after this long";
 
@@ -114,6 +115,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("input") => args.engine.input_device = Some(parser.value()?.string()?),
             Long("output") => args.engine.output_device = Some(parser.value()?.string()?),
             Long("audio-host") => args.engine.host = Some(parser.value()?.string()?),
+            Long("record") => args.engine.record_to = Some(parser.value()?.into()),
             Long("help") | Short('h') => {
                 println!("{USAGE}");
                 std::process::exit(0);
