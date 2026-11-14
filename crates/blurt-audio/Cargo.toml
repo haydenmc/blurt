@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 audioadapter-buffers = "2"
-cpal = { version = "0.18.2", features = ["pulseaudio"] }
+cpal = "0.18.2"
 log = "0.4"
 nnnoiseless = { version = "0.5.2", default-features = false }
 opus = "0.4.0"
@@ -20,3 +20,11 @@ sonora = "0.3"
 sonora-agc2 = "0.3"
 sonora-simd = "0.3"
 thiserror = "2"
+
+[features]
+default = ["pulseaudio"]
+# Linux audio hosts, besides ALSA (always built). With both, the default host
+# is PipeWire when its server is running, then PulseAudio.
+pulseaudio = ["cpal/pulseaudio"]
+# Needs libpipewire-0.3 and libclang to build.
+pipewire = ["cpal/pipewire"]

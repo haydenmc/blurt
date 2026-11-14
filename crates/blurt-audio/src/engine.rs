@@ -32,6 +32,8 @@ pub enum AudioError {
     NoDevice(&'static str),
     #[error("unknown audio device {0:?}")]
     UnknownDevice(String),
+    #[error("audio host {0:?} isn't available (see `hosts()`)")]
+    UnknownHost(String),
     #[error("unsupported sample format {0:?}")]
     UnsupportedFormat(cpal::SampleFormat),
     #[error("audio device error: {0}")]
@@ -53,14 +55,33 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
-pub fn input_devices() -> Result<Vec<DeviceInfo>, AudioError> {
-    let host = cpal::default_host();
+/// The audio hosts (system audio APIs) available here, e.g. "PipeWire",
+/// "PulseAudio", "ALSA". Any of them can go in [`EngineConfig::host`].
+pub fn hosts() -> Vec<&'static str> {
+    cpal::available_hosts().iter().map(|id| id.name()).collect()
+}
+
+/// `None` is the platform's preferred host.
+fn host(name: Option<&str>) -> Result<cpal::Host, AudioError> {
+    let Some(name) = name else {
+        return Ok(cpal::default_host());
+    };
+    let id = cpal::available_hosts()
+        .into_iter()
+        .find(|id| id.name().eq_ignore_ascii_case(name))
+        .ok_or_else(|| AudioError::UnknownHost(name.to_string()))?;
+    Ok(cpal::host_from_id(id)?)
+}
+
+/// Device ids are only meaningful to the host they were listed from.
+pub fn input_devices(host_name: Option<&str>) -> Result<Vec<DeviceInfo>, AudioError> {
+    let host = host(host_name)?;
     let default = host.default_input_device().and_then(|d| d.id().ok());
     list(host.input_devices()?, default)
 }
 
-pub fn output_devices() -> Result<Vec<DeviceInfo>, AudioError> {
-    let host = cpal::default_host();
+pub fn output_devices(host_name: Option<&str>) -> Result<Vec<DeviceInfo>, AudioError> {
+    let host = host(host_name)?;
     let default = host.default_output_device().and_then(|d| d.id().ok());
     list(host.output_devices()?, default)
 }
@@ -87,6 +108,9 @@ fn list(
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// The audio host, by name (see [`hosts`]). `None` is the platform's
+    /// preferred one.
+    pub host: Option<String>,
     /// `None` follows the system default.
     pub input_device: Option<String>,
     pub output_device: Option<String>,
@@ -104,6 +128,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            host: None,
             input_device: None,
             output_device: None,
             processing: Processing::default(),
@@ -301,8 +326,8 @@ struct Devices {
 
 impl Devices {
     fn open(config: &EngineConfig, shared: &Arc<Shared>) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        log::info!("Audio host: {:?}", host.id());
+        let host = host(config.host.as_deref())?;
+        log::info!("Audio host: {}", host.id().name());
         let input = find_device(&host, config.input_device.as_deref(), true)?;
         let output = find_device(&host, config.output_device.as_deref(), false)?;
 
