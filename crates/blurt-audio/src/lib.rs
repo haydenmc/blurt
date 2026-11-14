@@ -10,8 +10,14 @@
 
 pub mod capture;
 pub mod codec;
+pub mod engine;
 pub mod jitter;
 pub mod mixer;
+pub mod resample;
+
+pub use engine::{
+    AudioError, DeviceInfo, Engine, EngineConfig, EngineStats, input_devices, output_devices,
+};
 
 /// Everything inside the engine runs at 48 kHz mono, Opus's native rate.
 pub const SAMPLE_RATE: u32 = 48_000;

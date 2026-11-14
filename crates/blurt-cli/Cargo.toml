@@ -1,0 +1,16 @@
+[package]
+name = "blurt-cli"
+description = "A headless blurt client for testing the audio engine against a server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blurt-audio = { path = "../blurt-audio" }
+env_logger = "0.11"
+lexopt = "0.3"
+log = "0.4"
+mumble-protocol = { path = "../mumble-protocol" }
+tokio = { version = "1.53", features = ["macros", "rt", "signal", "sync", "time"] }

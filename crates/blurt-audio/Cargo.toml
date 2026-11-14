@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+audioadapter-buffers = "2"
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 log = "0.4"
 nnnoiseless = { version = "0.5.2", default-features = false }
