@@ -8,4 +8,21 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "wayland", "x11", "thread-pool", "crisp"] }
+blurt-audio = { path = "../blurt-audio" }
+directories = "6"
+env_logger = "0.11"
+# tokio, because mumble-protocol spawns its connection tasks on it.
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "crisp"] }
+log = "0.4"
+mumble-protocol = { path = "../mumble-protocol" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.53", features = ["rt", "sync"] }
+toml = "1"
+
+[features]
+# The native PipeWire audio host (needs libpipewire-0.3 and libclang to build).
+default = ["pipewire"]
+pipewire = ["blurt-audio/pipewire"]
+# Render with the GPU (wgpu) instead of the CPU (tiny-skia). blurt's UI is
+# mostly text, which tiny-skia draws with far less memory.
+gpu = ["iced/wgpu"]
