@@ -38,6 +38,7 @@ pub struct MumbleClient {
     // Shared across clones so the audio loop sees mute changes immediately,
     // without waiting for the server to echo our UserState back.
     self_muted: Arc<AtomicBool>,
+    self_deafened: Arc<AtomicBool>,
 
     // Whether voice currently goes over UDP (vs. the TCP tunnel).
     voice_over_udp: Arc<AtomicBool>,
@@ -96,6 +97,9 @@ pub enum MumbleConnectionError {
     #[error("Disconnected from server")]
     Disconnected,
 
+    #[error("The server did not answer in time")]
+    Timeout,
+
     #[error("Prost decode error: {0}")]
     ProstDecodeError(#[from] prost::DecodeError),
 
@@ -128,6 +132,13 @@ pub struct ConnectionOptions {
     /// Speak the pre-1.5 voice format even to newer servers (announcing
     /// version 1.4). Mainly for testing legacy support against a 1.5 server.
     pub legacy_voice: bool,
+
+    /// Passwords for password-protected channels.
+    pub access_tokens: Vec<String>,
+
+    /// How we describe ourselves to the server (shown in its user info),
+    /// e.g. "blurt 0.1.0".
+    pub client_release: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +150,9 @@ pub struct ServerStats {
     pub max_bandwidth_per_user: u32,
 }
 
+/// Asks a server for its version, user count, and bandwidth limit over UDP,
+/// without connecting (as server lists do). Works with servers before and
+/// after 1.5. UDP may be dropped, so this resends once and gives up after 3 s.
 pub async fn get_server_stats(
     server: String,
     port: Option<u16>,
@@ -150,53 +164,117 @@ pub async fn get_server_stats(
         .ok_or(MumbleConnectionError::IoError(io::Error::other(
             "No address found",
         )))?;
+    log::trace!("Pinging server {} on port {}", server, port);
+    ping_server(addr).await
+}
+
+async fn ping_server(addr: SocketAddr) -> Result<ServerStats, MumbleConnectionError> {
+    const RESEND_AFTER: Duration = Duration::from_secs(1);
+    const GIVE_UP_AFTER: Duration = Duration::from_secs(3);
+
     let bind = if addr.is_ipv6() {
         "[::]:0"
     } else {
         "0.0.0.0:0"
     };
+    let socket = UdpSocket::bind(bind).await?;
+    socket.connect(addr).await?;
 
-    log::trace!("Pinging server {} on port {}", server, port);
-
-    let timestamp = std::time::SystemTime::now()
+    // Both reply formats echo this back, which identifies our ping.
+    let ident = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    let socket = tokio::net::UdpSocket::bind(bind).await?;
-    let ping_message = crate::raw_udp::Ping {
-        timestamp,
+        .map_or(0, |d| d.as_micros() as u64);
+    // Every server answers the legacy ping: four zero bytes, then the ident.
+    let mut legacy = [0u8; 12];
+    legacy[4..].copy_from_slice(&ident.to_be_bytes());
+    // 1.5+ servers also answer the protobuf one.
+    let mut protobuf = vec![crate::raw_udp::Ping::TYPE_ID];
+    crate::raw_udp::Ping {
+        timestamp: ident,
         request_extended_information: true,
         ..Default::default()
-    };
-    let mut ping_buf = Vec::new();
-    ping_buf.push(crate::raw_udp::Ping::TYPE_ID);
-    ping_message.encode(&mut ping_buf)?;
-    socket.send_to(&ping_buf, (server.clone(), port)).await?;
-
-    loop {
-        let mut buf = vec![0u8; 1024]; // TODO: size of the expected buffer.
-        let (len, _amt_read_from) = socket.recv_from(&mut buf).await?;
-
-        // Should be a ping message in response
-        let response = crate::raw_udp::Ping::decode(&buf[1..len])?;
-        if response.timestamp == timestamp {
-            let round_trip_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-                - timestamp;
-            return Ok(ServerStats {
-                round_trip_time,
-                server_version_v2: response.server_version_v2,
-                user_count: response.user_count,
-                max_user_count: response.max_user_count,
-                max_bandwidth_per_user: response.max_bandwidth_per_user,
-            });
-        }
-
-        // TODO: abandon after a bit.
     }
+    .encode(&mut protobuf)?;
+
+    let start = tokio::time::Instant::now();
+    let deadline = start + GIVE_UP_AFTER;
+    let mut next_send = start;
+    let mut last_sent = start;
+    let mut buf = [0u8; 1024];
+    // A 1.5+ server answers both pings, and only its protobuf answer has the
+    // exact version (the legacy one caps the patch number at 255). Having the
+    // legacy answer, wait this long for the protobuf one.
+    const PROTOBUF_GRACE: Duration = Duration::from_millis(250);
+    let mut legacy_answer: Option<(ServerStats, tokio::time::Instant)> = None;
+    loop {
+        if legacy_answer.is_none() && tokio::time::Instant::now() >= next_send {
+            last_sent = tokio::time::Instant::now();
+            socket.send(&legacy).await?;
+            socket.send(&protobuf).await?;
+            next_send += RESEND_AFTER;
+        }
+        let wake = match &legacy_answer {
+            Some((_, grace_ends)) => *grace_ends,
+            None => next_send.min(deadline),
+        };
+        let len = match tokio::time::timeout_at(wake, socket.recv(&mut buf)).await {
+            Ok(received) => received?,
+            Err(_) => {
+                if let Some((stats, _)) = legacy_answer {
+                    return Ok(stats);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(MumbleConnectionError::Timeout);
+                }
+                continue;
+            }
+        };
+        let Some((mut stats, is_legacy)) = parse_server_ping(&buf[..len], ident) else {
+            continue;
+        };
+        stats.round_trip_time = last_sent.elapsed().as_millis() as u64;
+        if !is_legacy {
+            return Ok(stats);
+        }
+        if stats.server_version_v2 < VoiceFormat::PROTOBUF_SINCE {
+            // An old server: no protobuf answer is coming.
+            return Ok(stats);
+        }
+        legacy_answer.get_or_insert((stats, tokio::time::Instant::now() + PROTOBUF_GRACE));
+    }
+}
+
+/// Parses an answer to either ping format, if it answers ours. Also returns
+/// whether it was the legacy format.
+fn parse_server_ping(reply: &[u8], ident: u64) -> Option<(ServerStats, bool)> {
+    // Legacy: version, ident, users, max users, bandwidth (big-endian).
+    if reply.len() == 24 && reply[4..12] == ident.to_be_bytes() {
+        let be = |i: usize| u32::from_be_bytes(reply[i..i + 4].try_into().unwrap());
+        let v1 = be(0);
+        let stats = ServerStats {
+            round_trip_time: 0,
+            server_version_v2: u64::from(v1 >> 16 & 0xFF) << 48
+                | u64::from(v1 >> 8 & 0xFF) << 32
+                | u64::from(v1 & 0xFF) << 16,
+            user_count: be(12),
+            max_user_count: be(16),
+            max_bandwidth_per_user: be(20),
+        };
+        return Some((stats, true));
+    }
+    let (&kind, body) = reply.split_first()?;
+    if kind != crate::raw_udp::Ping::TYPE_ID {
+        return None;
+    }
+    let ping = crate::raw_udp::Ping::decode(body).ok()?;
+    let stats = ServerStats {
+        round_trip_time: 0,
+        server_version_v2: ping.server_version_v2,
+        user_count: ping.user_count,
+        max_user_count: ping.max_user_count,
+        max_bandwidth_per_user: ping.max_bandwidth_per_user,
+    };
+    (ping.timestamp == ident).then_some((stats, false))
 }
 
 pub async fn connect(options: ConnectionOptions) -> Result<Connection, MumbleConnectionError> {
@@ -280,7 +358,12 @@ async fn connect_over(
     let version = crate::raw::Version {
         // not necessary, but nice
         os: Some(std::env::consts::OS.into()),
-        release: Some("mumbo 0.1.0".into()),
+        release: Some(
+            options
+                .client_release
+                .clone()
+                .unwrap_or_else(|| concat!("mumble-protocol ", env!("CARGO_PKG_VERSION")).into()),
+        ),
         os_version: None,
 
         // required
@@ -315,8 +398,7 @@ async fn connect_over(
         username: options.username,
         password: options.password,
 
-        // We don't support authentication tokens for now
-        tokens: vec![],
+        tokens: options.access_tokens,
 
         // Outdated params
         celt_versions: vec![],
@@ -388,6 +470,7 @@ async fn connect_over(
             cancel: cancellation_token,
             outgoing: server_tx,
             self_muted: Arc::new(AtomicBool::new(false)),
+            self_deafened: Arc::new(AtomicBool::new(false)),
             voice_over_udp,
         },
         events: events_rx,
@@ -648,6 +731,24 @@ impl MumbleClient {
         frame_counter: u64,
         is_terminator: bool,
     ) -> Result<(), MumbleConnectionError> {
+        self.send_audio_to(audio, frame_counter, is_terminator, Self::TARGET_NORMAL)
+    }
+
+    /// Normal speech, to everyone in our channel.
+    pub const TARGET_NORMAL: u32 = 0;
+    /// The server sends our voice straight back to us (for testing).
+    pub const TARGET_LOOPBACK: u32 = 31;
+
+    /// Like [`send_audio`](Self::send_audio), but to a voice target: one set up
+    /// with [`set_voice_target`](Self::set_voice_target) (1–30), or one of the
+    /// `TARGET_*` constants.
+    pub fn send_audio_to(
+        &self,
+        audio: &[u8],
+        frame_counter: u64,
+        is_terminator: bool,
+        target: u32,
+    ) -> Result<(), MumbleConnectionError> {
         let muted = self.self_muted.load(Ordering::Relaxed);
         if muted && !is_terminator {
             return Ok(());
@@ -658,12 +759,7 @@ impl MumbleClient {
         let packet = crate::ClientToServerMessage::UdpTunnel(
             crate::ClientToServerUdpMessage::Audio(crate::raw_udp::Audio {
                 opus_data: audio.to_vec(),
-
-                // Normal speech
-                header: Some(crate::raw_udp::audio::Header::Target(0)),
-
-                // Server loop-back
-                // header: Some(crate::raw_udp::audio::Header::Target(31)),
+                header: Some(crate::raw_udp::audio::Header::Target(target)),
                 frame_number: frame_counter,
                 is_terminator,
 
@@ -735,6 +831,34 @@ impl MumbleClient {
         )))
     }
 
+    /// Deafens or undeafens us. Deafened, the server sends us no voice.
+    /// Deafening also mutes, as in the official client; undeafening leaves
+    /// the mute as it is (use [`set_self_mute`](Self::set_self_mute)).
+    pub fn set_self_deaf(&self, deafened: bool) -> Result<(), MumbleConnectionError> {
+        self.self_deafened.store(deafened, Ordering::Relaxed);
+        if deafened {
+            self.self_muted.store(true, Ordering::Relaxed);
+        }
+        self.send(crate::ClientToServerMessage::UserState(Box::new(
+            crate::raw::UserState {
+                self_deaf: Some(deafened),
+                self_mute: deafened.then_some(true),
+                ..Default::default()
+            },
+        )))
+    }
+
+    /// Whether we asked to be deafened. Takes effect immediately, before the
+    /// server confirms, so the audio engine can stop playback at once.
+    pub fn is_self_deafened(&self) -> bool {
+        self.self_deafened.load(Ordering::Relaxed)
+    }
+
+    /// Whether we asked to be muted (directly, or by deafening).
+    pub fn is_self_muted(&self) -> bool {
+        self.self_muted.load(Ordering::Relaxed)
+    }
+
     pub fn set_channel(&self, channel_id: u32) -> Result<(), MumbleConnectionError> {
         self.send(crate::ClientToServerMessage::UserState(Box::new(
             crate::raw::UserState {
@@ -742,6 +866,68 @@ impl MumbleClient {
                 ..Default::default()
             },
         )))
+    }
+
+    /// Replaces our access tokens: the passwords that let us into
+    /// password-protected channels. Send them before joining such a channel.
+    pub fn set_access_tokens(&self, tokens: Vec<String>) -> Result<(), MumbleConnectionError> {
+        self.send(crate::ClientToServerMessage::Authenticate(
+            crate::raw::Authenticate {
+                tokens,
+                ..Default::default()
+            },
+        ))
+    }
+
+    /// Defines voice target `id` (1–30) for whispering to users or shouting
+    /// to channels; then send voice with [`send_audio_to`](Self::send_audio_to).
+    pub fn set_voice_target(
+        &self,
+        id: u32,
+        targets: Vec<crate::raw::voice_target::Target>,
+    ) -> Result<(), MumbleConnectionError> {
+        self.send(crate::ClientToServerMessage::VoiceTarget(
+            crate::raw::VoiceTarget {
+                id: Some(id),
+                targets,
+            },
+        ))
+    }
+
+    /// Asks for our permissions in a channel; the server answers with a
+    /// `PermissionQuery`.
+    pub fn query_permissions(&self, channel_id: u32) -> Result<(), MumbleConnectionError> {
+        self.send(crate::ClientToServerMessage::PermissionQuery(
+            crate::raw::PermissionQuery {
+                channel_id: Some(channel_id),
+                ..Default::default()
+            },
+        ))
+    }
+
+    /// Asks for a user's connection statistics; the server answers with a
+    /// `UserStats`. `stats_only` skips the certificate and version details.
+    pub fn request_user_stats(
+        &self,
+        session: u32,
+        stats_only: bool,
+    ) -> Result<(), MumbleConnectionError> {
+        self.send(crate::ClientToServerMessage::UserStats(Box::new(
+            crate::raw::UserStats {
+                session: Some(session),
+                stats_only: Some(stats_only),
+                ..Default::default()
+            },
+        )))
+    }
+
+    /// Asks for large fields the server leaves out of state updates and
+    /// sends only on request: avatars, comments, and channel descriptions.
+    pub fn request_blobs(
+        &self,
+        request: crate::raw::RequestBlob,
+    ) -> Result<(), MumbleConnectionError> {
+        self.send(crate::ClientToServerMessage::RequestBlob(request))
     }
 
     /// Compares the mute we last requested against the one the server last
@@ -1548,6 +1734,164 @@ mod tests {
         let reply = server.receive_message::<raw::CryptSetup>().await;
         assert!(reply.client_nonce.is_some());
         assert!(reply.key.is_none() && reply.server_nonce.is_none());
+    }
+
+    #[tokio::test]
+    async fn deafening_also_mutes_and_stops_our_voice() {
+        let (connection, mut server) = connected().await;
+
+        connection.client.set_self_deaf(true).unwrap();
+        let state = server.receive_message::<raw::UserState>().await;
+        assert_eq!(state.self_deaf, Some(true));
+        assert_eq!(state.self_mute, Some(true));
+        assert!(connection.client.is_self_deafened());
+        assert!(connection.client.is_self_muted());
+
+        // Muted, so only the terminator of a burst goes out, without voice.
+        connection.client.send_audio(&[1], 1, false).unwrap();
+        connection.client.send_audio(&[2], 2, true).unwrap();
+        let audio = server.receive_audio().await;
+        assert_eq!(audio.frame_number, 2);
+        assert!(audio.opus_data.is_empty());
+
+        // Undeafening leaves the mute alone.
+        connection.client.set_self_deaf(false).unwrap();
+        let state = server.receive_message::<raw::UserState>().await;
+        assert_eq!(state.self_deaf, Some(false));
+        assert_eq!(state.self_mute, None);
+        assert!(connection.client.is_self_muted());
+    }
+
+    #[tokio::test]
+    async fn access_tokens_are_sent_on_connect() {
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        let options = ConnectionOptions {
+            access_tokens: vec!["sesame".to_string()],
+            ..options()
+        };
+        tokio::spawn(connect_over(client_end, options, None));
+        let mut server = FakeServer {
+            frames: Framed::new(server_end, MumbleFrameCodec),
+        };
+        assert_eq!(server.greet().await.tokens, ["sesame"]);
+    }
+
+    #[tokio::test]
+    async fn access_tokens_can_change_while_connected() {
+        let (connection, mut server) = connected().await;
+
+        connection
+            .client
+            .set_access_tokens(vec!["a".to_string(), "b".to_string()])
+            .unwrap();
+
+        let auth = server.receive_message::<raw::Authenticate>().await;
+        assert_eq!(auth.tokens, ["a", "b"]);
+        assert_eq!(auth.username, None, "only the tokens change");
+    }
+
+    #[tokio::test]
+    async fn whispering_sets_up_a_target_and_sends_to_it() {
+        let (connection, mut server) = connected().await;
+
+        let target = raw::voice_target::Target {
+            session: vec![1],
+            ..Default::default()
+        };
+        connection.client.set_voice_target(3, vec![target]).unwrap();
+        let voice_target = server.receive_message::<raw::VoiceTarget>().await;
+        assert_eq!(voice_target.id, Some(3));
+        assert_eq!(voice_target.targets[0].session, [1]);
+
+        connection.client.send_audio_to(&[1], 1, false, 3).unwrap();
+        assert_eq!(
+            server.receive_audio().await.header,
+            Some(raw_udp::audio::Header::Target(3))
+        );
+    }
+
+    #[test]
+    fn legacy_server_ping_replies_parse() {
+        let ident = 0x0102_0304_0506_0708u64;
+        let mut reply = vec![0, 1, 4, 7]; // Version 1.4.7.
+        reply.extend_from_slice(&ident.to_be_bytes());
+        for v in [5u32, 100, 72_000] {
+            reply.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let (stats, is_legacy) = parse_server_ping(&reply, ident).unwrap();
+        assert!(is_legacy);
+        assert_eq!(stats.server_version_v2, 1 << 48 | 4 << 32 | 7 << 16);
+        assert_eq!(stats.user_count, 5);
+        assert_eq!(stats.max_user_count, 100);
+        assert_eq!(stats.max_bandwidth_per_user, 72_000);
+        assert!(parse_server_ping(&reply, ident + 1).is_none(), "not ours");
+    }
+
+    #[tokio::test]
+    async fn server_ping_works_with_a_legacy_only_server() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            loop {
+                let (len, from) = server.recv_from(&mut buf).await.unwrap();
+                // An old server ignores the protobuf ping.
+                if !(len == 12 && buf[..4] == [0; 4]) {
+                    continue;
+                }
+                let mut reply = vec![0, 1, 4, 0];
+                reply.extend_from_slice(&buf[4..12]);
+                reply.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 10, 0, 1, 0, 0]);
+                server.send_to(&reply, from).await.unwrap();
+            }
+        });
+
+        let stats = ping_server(addr).await.unwrap();
+        assert_eq!(stats.user_count, 2);
+        assert_eq!(stats.server_version_v2, 1 << 48 | 4 << 32);
+    }
+
+    #[tokio::test]
+    async fn server_ping_prefers_the_exact_version_from_newer_servers() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            loop {
+                let (len, from) = server.recv_from(&mut buf).await.unwrap();
+                if len == 12 && buf[..4] == [0; 4] {
+                    // The legacy answer caps the patch number: 1.5.255.
+                    let mut reply = vec![0, 1, 5, 255];
+                    reply.extend_from_slice(&buf[4..12]);
+                    reply.extend_from_slice(&[0; 12]);
+                    server.send_to(&reply, from).await.unwrap();
+                } else {
+                    // The protobuf answer, a little later, has it exactly.
+                    let ping = raw_udp::Ping::decode(&buf[1..len]).unwrap();
+                    let mut reply = vec![raw_udp::Ping::TYPE_ID];
+                    raw_udp::Ping {
+                        timestamp: ping.timestamp,
+                        server_version_v2: 1 << 48 | 5 << 32 | 735 << 16,
+                        ..Default::default()
+                    }
+                    .encode(&mut reply)
+                    .unwrap();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    server.send_to(&reply, from).await.unwrap();
+                }
+            }
+        });
+
+        let stats = ping_server(addr).await.unwrap();
+        assert_eq!(stats.server_version_v2, 1 << 48 | 5 << 32 | 735 << 16);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_ping_gives_up_on_a_silent_server() {
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let result = ping_server(silent.local_addr().unwrap()).await;
+        assert!(matches!(result, Err(MumbleConnectionError::Timeout)));
     }
 
     async fn wait_until(condition: impl Fn() -> bool) {

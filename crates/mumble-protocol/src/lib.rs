@@ -219,6 +219,10 @@ pub enum ClientToServerMessage {
     TextMessage(raw::TextMessage),
     UserState(Box<raw::UserState>),
     CryptSetup(raw::CryptSetup),
+    VoiceTarget(raw::VoiceTarget),
+    PermissionQuery(raw::PermissionQuery),
+    UserStats(Box<raw::UserStats>),
+    RequestBlob(raw::RequestBlob),
 }
 
 impl ClientToServerMessage {
@@ -247,6 +251,18 @@ impl ClientToServerMessage {
             }
             ClientToServerMessage::CryptSetup(msg) => {
                 Ok((raw::CryptSetup::TYPE_ID, msg.encode_to_vec()))
+            }
+            ClientToServerMessage::VoiceTarget(msg) => {
+                Ok((raw::VoiceTarget::TYPE_ID, msg.encode_to_vec()))
+            }
+            ClientToServerMessage::PermissionQuery(msg) => {
+                Ok((raw::PermissionQuery::TYPE_ID, msg.encode_to_vec()))
+            }
+            ClientToServerMessage::UserStats(msg) => {
+                Ok((raw::UserStats::TYPE_ID, msg.encode_to_vec()))
+            }
+            ClientToServerMessage::RequestBlob(msg) => {
+                Ok((raw::RequestBlob::TYPE_ID, msg.encode_to_vec()))
             }
         }
     }
