@@ -10,11 +10,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use prost::Message;
 use tokio::net::UdpSocket;
 
 use crate::crypt::{CryptState, CryptStats, HEADER_LEN};
-use crate::{ServerToClientUdpMessage, UdpMessageId, raw, raw_udp};
+use crate::voice::VoiceFormat;
+use crate::{ServerToClientUdpMessage, raw, raw_udp};
 
 /// How often to ping while UDP works (the official client uses 5 s).
 const PING_INTERVAL: Duration = Duration::from_secs(5);
@@ -43,6 +43,7 @@ pub(crate) enum Datagram {
 
 pub(crate) struct UdpVoice {
     server: SocketAddr,
+    format: VoiceFormat,
     socket: Option<Arc<UdpSocket>>,
     crypt: Option<CryptState>,
     /// Whether voice should go over UDP rather than the TCP tunnel.
@@ -59,9 +60,10 @@ pub(crate) struct UdpVoice {
 }
 
 impl UdpVoice {
-    pub fn new(server: SocketAddr) -> Self {
+    pub fn new(server: SocketAddr, format: VoiceFormat) -> Self {
         Self {
             server,
+            format,
             socket: None,
             crypt: None,
             active: false,
@@ -175,11 +177,7 @@ impl UdpVoice {
         if !self.active {
             return false;
         }
-        self.plain.clear();
-        self.plain.push(raw_udp::Audio::TYPE_ID);
-        audio
-            .encode(&mut self.plain)
-            .expect("Vec<u8> grows as needed");
+        self.format.encode_audio(audio, &mut self.plain);
         self.send_plain().await
     }
 
@@ -213,26 +211,15 @@ impl UdpVoice {
             self.active = true;
         }
 
-        let Some((&kind, body)) = self.plain.split_first() else {
-            return Datagram::Nothing;
-        };
-        match kind {
-            raw_udp::Audio::TYPE_ID => match raw_udp::Audio::decode(body) {
-                Ok(audio) => Datagram::Message(ServerToClientUdpMessage::Audio(audio)),
-                Err(e) => {
-                    log::debug!("Dropping malformed UDP voice packet: {e}");
-                    Datagram::Nothing
-                }
-            },
-            raw_udp::Ping::TYPE_ID => {
-                if let Ok(ping) = raw_udp::Ping::decode(body) {
-                    let sent = self.epoch + Duration::from_micros(ping.timestamp);
-                    self.rtt = Some(now.saturating_duration_since(sent));
-                }
+        match crate::voice::decode(&self.plain) {
+            Ok(ServerToClientUdpMessage::Ping(ping)) => {
+                let sent = self.epoch + Duration::from_micros(ping.timestamp);
+                self.rtt = Some(now.saturating_duration_since(sent));
                 Datagram::Nothing
             }
-            _ => {
-                log::debug!("Dropping UDP packet of unknown type {kind}");
+            Ok(message) => Datagram::Message(message),
+            Err(e) => {
+                log::debug!("Dropping UDP packet: {e}");
                 Datagram::Nothing
             }
         }
@@ -240,14 +227,8 @@ impl UdpVoice {
 
     async fn send_ping(&mut self, now: Instant) {
         self.last_ping = Some(now);
-        let ping = raw_udp::Ping {
-            timestamp: u64::try_from((now - self.epoch).as_micros()).unwrap_or(u64::MAX),
-            ..Default::default()
-        };
-        self.plain.clear();
-        self.plain.push(raw_udp::Ping::TYPE_ID);
-        ping.encode(&mut self.plain)
-            .expect("Vec<u8> grows as needed");
+        let timestamp = u64::try_from((now - self.epoch).as_micros()).unwrap_or(u64::MAX);
+        self.format.encode_ping(timestamp, &mut self.plain);
         self.send_plain().await;
     }
 
@@ -273,6 +254,8 @@ impl UdpVoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UdpMessageId;
+    use prost::Message;
 
     const KEY: [u8; 16] = [7; 16];
     const CLIENT_NONCE: [u8; 16] = [1; 16];
@@ -301,7 +284,7 @@ mod tests {
 
     async fn keyed(now: Instant) -> (UdpVoice, UdpSocket) {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut udp = UdpVoice::new(server.local_addr().unwrap());
+        let mut udp = UdpVoice::new(server.local_addr().unwrap(), VoiceFormat::Protobuf);
         assert!(udp.on_crypt_setup(&keys(), now).await.unwrap().is_none());
         (udp, server)
     }

@@ -2,7 +2,8 @@
 //! to the other, and over which transport.
 //!
 //! ```bash
-//! cargo run -p mumble-protocol --example voice_check -- HOST [PORT] [PASSWORD]
+//! [VOICE_CHECK_LEGACY=talker|listener|both] \
+//!   cargo run -p mumble-protocol --example voice_check -- HOST [PORT] [PASSWORD]
 //! ```
 
 use std::time::{Duration, Instant};
@@ -23,7 +24,10 @@ async fn main() {
         .get(2)
         .map(|p| p.parse().expect("PORT must be a number"));
     let password = args.get(3).cloned();
-    let options = |name: &str| ConnectionOptions {
+    // VOICE_CHECK_LEGACY=talker|listener|both speaks the pre-1.5 voice format.
+    let legacy = std::env::var("VOICE_CHECK_LEGACY").unwrap_or_default();
+    let options = |name: &str, role: &str| ConnectionOptions {
+        legacy_voice: legacy == "both" || legacy == role,
         server: host.clone(),
         port,
         password: password.clone(),
@@ -31,8 +35,8 @@ async fn main() {
         ..Default::default()
     };
 
-    let talker = connect_trusting(options("blurt-talker")).await;
-    let mut listener = connect_trusting(options("blurt-listener")).await;
+    let talker = connect_trusting(options("blurt-talker", "talker")).await;
+    let mut listener = connect_trusting(options("blurt-listener", "listener")).await;
 
     let start = Instant::now();
     while !(talker.client.is_voice_over_udp() && listener.client.is_voice_over_udp())
@@ -57,16 +61,22 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let mut received = 0;
+    let mut missing: std::collections::BTreeSet<u64> = (0..PACKETS).collect();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while received < PACKETS {
+    while !missing.is_empty() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, listener.audio.recv()).await {
-            Ok(Some(_)) => received += 1,
+            Ok(Some(audio)) => {
+                missing.remove(&audio.frame_number);
+            }
             _ => break,
         }
     }
+    let received = PACKETS - missing.len() as u64;
     println!("listener received {received}/{PACKETS} voice packets");
+    if !missing.is_empty() {
+        println!("missing frame numbers: {missing:?}");
+    }
 
     talker.client.disconnect();
     listener.client.disconnect();

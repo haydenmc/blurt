@@ -14,6 +14,7 @@ pub mod codec;
 pub mod crypt;
 pub mod state;
 mod udp;
+pub mod voice;
 
 pub trait TcpMessageId: prost::Message + Default {
     const TYPE_ID: u16;
@@ -151,23 +152,11 @@ impl ServerToClientMessage {
     pub fn decode(msg_type: u16, payload: &[u8]) -> Result<ServerToClientMessage, Error> {
         let message = match msg_type {
             raw::Version::TYPE_ID => ServerToClientMessage::Version(raw::Version::decode(payload)?),
-            raw::UdpTunnel::TYPE_ID => {
-                let (&udp_type, rest) = payload.split_first().ok_or_else(|| {
-                    Error::new(std::io::ErrorKind::InvalidData, "Empty UDP payload")
-                })?;
-                match udp_type {
-                    raw_udp::Audio::TYPE_ID => ServerToClientMessage::UdpTunnel(
-                        ServerToClientUdpMessage::Audio(raw_udp::Audio::decode(rest)?),
-                    ),
-                    raw_udp::Ping::TYPE_ID => ServerToClientMessage::UdpTunnel(
-                        ServerToClientUdpMessage::Ping(raw_udp::Ping::decode(rest)?),
-                    ),
-                    _ => ServerToClientMessage::Unknown {
-                        type_id: msg_type,
-                        payload: payload.to_vec(),
-                    },
-                }
-            }
+            // Tunnelled voice, in either the protobuf or the legacy format.
+            raw::UdpTunnel::TYPE_ID => match voice::decode(payload) {
+                Ok(message) => ServerToClientMessage::UdpTunnel(message),
+                Err(e) => return Err(Error::new(std::io::ErrorKind::InvalidData, e)),
+            },
             raw::Ping::TYPE_ID => ServerToClientMessage::Ping(raw::Ping::decode(payload)?),
             raw::Reject::TYPE_ID => ServerToClientMessage::Reject(raw::Reject::decode(payload)?),
             raw::ChannelRemove::TYPE_ID => {
@@ -214,8 +203,10 @@ impl ServerToClientMessage {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClientToServerUdpMessage {
+    /// Voice, sent in the protobuf format.
     Audio(raw_udp::Audio),
-    // Ping(raw_udp::Ping),
+    /// A packet already encoded by [`voice::VoiceFormat`], e.g. legacy voice.
+    Encoded(Vec<u8>),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -239,7 +230,10 @@ impl ClientToServerMessage {
                     let mut payload = vec![raw_udp::Audio::TYPE_ID];
                     payload.extend(audio.encode_to_vec());
                     Ok((raw::UdpTunnel::TYPE_ID, payload))
-                } // ClientToServerUdpMessage::Ping(ping) => Ok((raw_udp::Ping::TYPE_ID, ping.encode_to_vec())),
+                }
+                ClientToServerUdpMessage::Encoded(payload) => {
+                    Ok((raw::UdpTunnel::TYPE_ID, payload.clone()))
+                }
             },
             ClientToServerMessage::Authenticate(msg) => {
                 Ok((raw::Authenticate::TYPE_ID, msg.encode_to_vec()))

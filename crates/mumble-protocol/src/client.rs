@@ -21,6 +21,7 @@ mod tls;
 pub use tls::{ClientIdentity, Fingerprint};
 
 use crate::udp::{Datagram, UdpVoice};
+use crate::voice::VoiceFormat;
 use crate::{
     ServerToClientMessage, ServerToClientUdpMessage, UdpMessageId,
     state::{ConnectionStatus, MumbleState},
@@ -123,6 +124,10 @@ pub struct ConnectionOptions {
     /// The client certificate to authenticate with. Registered users are
     /// recognized by it; without one, the user can't register.
     pub identity: Option<ClientIdentity>,
+
+    /// Speak the pre-1.5 voice format even to newer servers (announcing
+    /// version 1.4). Mainly for testing legacy support against a 1.5 server.
+    pub legacy_voice: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -261,8 +266,13 @@ async fn connect_over(
         });
     let mut writer = FramedWrite::new(stream_write, crate::codec::MumbleCodec::default());
 
-    // Send a version message!
-    let (major, minor, patch) = (1u32, 5u32, 0u32);
+    // Send a version message! The version tells the server which voice
+    // format we speak; announcing 1.4 makes even a 1.5 server use legacy.
+    let (major, minor, patch) = if options.legacy_voice {
+        (1u32, 4u32, 0u32)
+    } else {
+        (1u32, 5u32, 0u32)
+    };
     let our_version: u32 = (major << 16) | (minor << 8) | patch;
     let our_version_v2: u64 =
         (u64::from(major) << 48) | (u64::from(minor) << 32) | (u64::from(patch) << 16);
@@ -294,6 +304,12 @@ async fn connect_over(
         return Err(MumbleConnectionError::UnexpectedServerClose);
     };
     log::info!("Received version message: {:?}", version);
+    let voice_format = if options.legacy_voice {
+        VoiceFormat::Legacy
+    } else {
+        VoiceFormat::for_server(&version)
+    };
+    log::info!("Using the {voice_format:?} voice format");
 
     let authenticate = crate::raw::Authenticate {
         username: options.username,
@@ -349,7 +365,8 @@ async fn connect_over(
         events_tx,
     };
     let udp = Udp {
-        voice: udp_server.map(UdpVoice::new),
+        voice: udp_server.map(|server| UdpVoice::new(server, voice_format)),
+        format: voice_format,
         initial_setup: crypt_setup,
         active: voice_over_udp.clone(),
     };
@@ -423,6 +440,8 @@ impl Channels {
 struct Udp {
     /// `None` when there is no UDP server address (in tests).
     voice: Option<UdpVoice>,
+    /// The voice format, also used for voice tunnelled over TCP.
+    format: VoiceFormat,
     /// Keys the server sent during the handshake.
     initial_setup: Option<crate::raw::CryptSetup>,
     /// Shared with `MumbleClient`, so the app can show the transport.
@@ -452,9 +471,11 @@ async fn run(
     } = channels;
     let Udp {
         voice: mut udp,
+        format: voice_format,
         initial_setup,
         active: udp_active,
     } = udp;
+    let mut tunnel_buf = Vec::new();
 
     // Mumble requires pings every 30s by default; be eager.
     let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
@@ -532,10 +553,22 @@ async fn run(
                         _ => false,
                     };
                     if !sent_over_udp {
-                        if !matches!(message, crate::ClientToServerMessage::UdpTunnel(_)) {
-                            log::trace!("Sending message to server: {:?}", message);
+                        match &message {
+                            // Legacy servers expect legacy voice in the tunnel too.
+                            crate::ClientToServerMessage::UdpTunnel(crate::ClientToServerUdpMessage::Audio(audio))
+                                if voice_format == VoiceFormat::Legacy =>
+                            {
+                                voice_format.encode_audio(audio, &mut tunnel_buf);
+                                writer.send(crate::ClientToServerMessage::UdpTunnel(
+                                    crate::ClientToServerUdpMessage::Encoded(tunnel_buf.clone()),
+                                )).await?;
+                            }
+                            crate::ClientToServerMessage::UdpTunnel(_) => writer.send(message.clone()).await?,
+                            _ => {
+                                log::trace!("Sending message to server: {:?}", message);
+                                writer.send(message.clone()).await?;
+                            }
                         }
-                        writer.send(message.clone()).await?;
                     }
 
                     // Handle any bookkeeping needed for specific messages.
