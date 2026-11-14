@@ -9,7 +9,7 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use blurt_audio::capture::{Capture, Processing, TransmitMode};
+use blurt_audio::capture::{Capture, NoiseSuppression, Processing, TransmitMode};
 use blurt_audio::codec::EncoderConfig;
 use blurt_audio::jitter::JitterConfig;
 use blurt_audio::mixer::Mixer;
@@ -35,6 +35,8 @@ Options:
   --device-buffer N    device buffer in frames at the device rate (default 240)
   --no-aec --no-ns --no-agc
                        turn off echo cancellation, noise suppression, gain
+  --ns KIND            noise suppression: off, low, moderate, high (default),
+                       veryhigh or rnnoise
   --loopback           send our voice back to ourselves through the server
   --audio-host NAME    PipeWire, PulseAudio, ALSA... (default: the preferred one;
                        see `blurt-cli devices`)
@@ -66,6 +68,18 @@ enum Command {
     Devices,
     Talk,
     Measure,
+}
+
+fn parse_noise_suppression(kind: &str) -> Result<NoiseSuppression, lexopt::Error> {
+    Ok(match kind {
+        "off" => NoiseSuppression::Off,
+        "low" => NoiseSuppression::Low,
+        "moderate" => NoiseSuppression::Moderate,
+        "high" => NoiseSuppression::High,
+        "veryhigh" => NoiseSuppression::VeryHigh,
+        "rnnoise" => NoiseSuppression::Rnnoise,
+        other => return Err(format!("unknown noise suppression {other:?}").into()),
+    })
 }
 
 fn parse_args() -> Result<Args, lexopt::Error> {
@@ -110,7 +124,11 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("frames") => args.engine.encoder.frames_per_packet = parser.value()?.parse()?,
             Long("device-buffer") => args.engine.device_buffer_frames = parser.value()?.parse()?,
             Long("no-aec") => args.engine.processing.echo_cancellation = false,
-            Long("no-ns") => args.engine.processing.noise_suppression = false,
+            Long("no-ns") => args.engine.processing.noise_suppression = NoiseSuppression::Off,
+            Long("ns") => {
+                args.engine.processing.noise_suppression =
+                    parse_noise_suppression(&parser.value()?.string()?)?
+            }
             Long("no-agc") => args.engine.processing.auto_gain = false,
             Long("input") => args.engine.input_device = Some(parser.value()?.string()?),
             Long("output") => args.engine.output_device = Some(parser.value()?.string()?),
@@ -377,11 +395,7 @@ async fn measure(args: Args) -> Result<()> {
     let latencies = tokio::task::spawn_blocking(move || -> Result<Vec<Duration>, String> {
         let mut capture = Capture::new(
             // Processing would eat the synthetic click.
-            Processing {
-                echo_cancellation: false,
-                noise_suppression: false,
-                auto_gain: false,
-            },
+            Processing::NONE,
             TransmitMode::Continuous,
             EncoderConfig {
                 frames_per_packet: config.encoder.frames_per_packet,
