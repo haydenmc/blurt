@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  flatpak:
+    uses: ./.github/workflows/flatpak.yml
+
+  tarball:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match workspace version $version" >&2
+            exit 1
+          fi
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libfontconfig-dev libasound2-dev libopus-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p blurt
+      - name: Package
+        run: |
+          dir=blurt-$GITHUB_REF_NAME-x86_64-linux
+          mkdir -p "$dir"
+          cp target/release/blurt LICENSE README.md "$dir"/
+          cp packaging/io.github.haydenmc.blurt.desktop packaging/icons/io.github.haydenmc.blurt.svg "$dir"/
+          tar -czf blurt-x86_64-linux.tar.gz "$dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: blurt-x86_64-linux.tar.gz
+
+  release:
+    needs: [flatpak, tarball]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          **Install:** download `blurt.flatpak`, then `flatpak install --user blurt.flatpak`.
+
+          The tarball is a plain binary built on Ubuntu 24.04; it needs libopus and libpipewire-0.3 installed.
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "blurt $GITHUB_REF_NAME" --notes-file notes.md --generate-notes \
+            assets/blurt.flatpak assets/blurt-x86_64-linux.tar.gz

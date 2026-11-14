@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=blurt
+GenericName=Voice Chat
+Comment=A small, fast Mumble voice chat client
+Exec=blurt
+Icon=io.github.haydenmc.blurt
+Terminal=false
+Categories=Network;Chat;Telephony;
+Keywords=Mumble;VoIP;voice;chat;
+StartupNotify=true

@@ -1,0 +1,48 @@
+# Build locally (from the repository root):
+#   scripts/flatpak-sources.sh
+#   flatpak-builder --user --install-deps-from=flathub --force-clean \
+#     build-dir packaging/flatpak/io.github.haydenmc.blurt.yml
+id: io.github.haydenmc.blurt
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, for bindgen (the PipeWire bindings).
+  - org.freedesktop.Sdk.Extension.llvm22
+command: blurt
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Audio: native PipeWire for the lowest latency (as the official Mumble
+  # Flatpak does), PulseAudio where there's no PipeWire.
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0:ro
+  # The tray icon (StatusNotifierItem).
+  - --talk-name=org.kde.StatusNotifierWatcher
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+  env:
+    CARGO_HOME: /run/build/blurt/cargo
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+modules:
+  - name: blurt
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release -p blurt
+      - install -Dm755 target/release/blurt -t /app/bin
+      - install -Dm644 packaging/io.github.haydenmc.blurt.desktop -t /app/share/applications
+      - install -Dm644 packaging/io.github.haydenmc.blurt.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 packaging/icons/io.github.haydenmc.blurt.svg -t /app/share/icons/hicolor/scalable/apps
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
+          - .git
+      # Generated from Cargo.lock by scripts/flatpak-sources.sh.
+      - cargo-sources.json

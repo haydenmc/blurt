@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.haydenmc.blurt</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>blurt</name>
+  <summary>A small, fast Mumble voice chat client</summary>
+  <developer id="io.github.haydenmc">
+    <name>Hayden McAfee</name>
+  </developer>
+  <description>
+    <p>
+      blurt is a native client for Mumble voice chat servers. It aims to be
+      quick to start, light on memory and CPU, and to send clean, low-latency
+      audio.
+    </p>
+    <ul>
+      <li>Echo cancellation and RNNoise noise suppression</li>
+      <li>A voice gate that keeps bangs, typing and background noise off the air</li>
+      <li>Voice over encrypted UDP, falling back to TCP</li>
+      <li>Trust-on-first-use server certificates and a client certificate</li>
+      <li>Channel tree, chat, mute and deafen</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.haydenmc.blurt.desktop</launchable>
+  <url type="homepage">https://github.com/haydenmc/blurt</url>
+  <url type="bugtracker">https://github.com/haydenmc/blurt/issues</url>
+  <url type="vcs-browser">https://github.com/haydenmc/blurt</url>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+  </categories>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="0.1.0" date="2026-11-14">
+      <description>
+        <p>First release: connect to servers, join channels, talk, listen and chat.</p>
+      </description>
+    </release>
+  </releases>
+</component>
