@@ -64,3 +64,18 @@ These patches change parts of the crate's API that Mumbo's app uses:
   `src/protocol.ts` (whose tests parse the same fixtures) needs both.
 
 Update this list as patches are added or merged.
+
+## blurt-audio: kept ready to become its own crate
+
+`crates/blurt-audio` is meant to be split out later into its own repo, shared
+with Mumbo. Until then, keep it extractable with `git filter-repo
+--subdirectory-filter` and no cleanup needed afterwards:
+
+- Commits that touch it touch only it (and the root `Cargo.lock`). Changes to
+  `blurt-cli` or the app go in separate commits, written for someone reading
+  the audio crate on its own.
+- It depends on no other workspace crate, no UI and no async runtime. It
+  reaches the network only through the `VoiceSource` and `VoiceSink` traits.
+- Platform-specific code stays at the device edge (choosing the audio host,
+  real-time priority, device hot-plug). The DSP pipeline is the same on every
+  platform.
