@@ -2,18 +2,31 @@
 
 mod config;
 mod html;
+mod icons;
+mod room;
 mod session;
+#[cfg(test)]
+mod snapshots;
+mod talk;
+mod theme;
+mod transcript;
+mod ui;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blurt_audio::EngineConfig;
 use config::{Config, Server};
-use iced::widget::{button, center, column, container, row, scrollable, space, text, text_input};
-use iced::{Center, Element, Fill, FillPortion, Font, Subscription, Task, window};
+use iced::widget::{column, container};
+use iced::{Element, Fill, Size, Subscription, Task, keyboard, window};
 use mumble_protocol::client::{ConnectionOptions, Fingerprint};
-use mumble_protocol::state::{MumbleState, TextMessage};
+use mumble_protocol::state::MumbleState;
+use room::Room;
 use session::Session;
+use theme::{Accent, Mode, Tokens};
+use ui::pages::{self, Editor, Field};
+use ui::voice::{self, progress};
+use ui::{Layout, Page, Pivot, chrome};
 
 fn main() -> iced::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -21,9 +34,15 @@ fn main() -> iced::Result {
     // Until the tray exists (milestone 5), closing the last window quits.
     iced::daemon(Blurt::new, Blurt::update, Blurt::view)
         .title(Blurt::title)
+        .theme(Blurt::theme)
         .subscription(Blurt::subscription)
         .run()
 }
+
+/// The size the window opens at: wide, with room for the tree and chat.
+const WINDOW: Size = Size::new(900.0, 600.0);
+/// While anything animates, redraw this often (about 30 fps).
+const FRAME: Duration = Duration::from_millis(33);
 
 struct Blurt {
     window: Option<window::Id>,
@@ -31,12 +50,19 @@ struct Blurt {
     dir: Option<PathBuf>,
     config: Config,
     screen: Screen,
-    /// Shown above whatever screen is up, until dismissed.
+    page: Page,
+    /// The server form, open over the servers page.
+    editor: Option<Editor>,
+    /// Shown above whatever page is up, until dismissed.
     error: Option<String>,
+    width: f32,
+    layout: Layout,
+    /// When the layout last switched, to fade the new one in.
+    reflowed: Option<Instant>,
 }
 
 enum Screen {
-    Servers(Option<Editor>),
+    Idle,
     Connecting {
         server: Server,
         _task: iced::task::Handle,
@@ -49,44 +75,28 @@ enum Screen {
     Connected(Box<Connected>),
 }
 
-/// The add/edit server form.
-#[derive(Default)]
-struct Editor {
-    /// Which saved server this edits; `None` adds one.
-    index: Option<usize>,
-    label: String,
-    host: String,
-    port: String,
-    username: String,
-    password: String,
-}
-
+/// A live connection: its handles, and the room as drawn.
 struct Connected {
-    server: Server,
     session: Session,
-    /// The client's state as of the last change, for drawing.
-    state: MumbleState,
-    muted: bool,
-    deafened: bool,
-    transmitting: bool,
-    draft: String,
+    room: Room,
+    /// Push-to-talk held with the pointer, and with the space bar.
+    pointer_talk: bool,
+    key_talk: bool,
     _task: iced::task::Handle,
 }
 
 #[derive(Debug, Clone)]
-enum Field {
-    Label,
-    Host,
-    Port,
-    Username,
-    Password,
-}
-
-#[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    Resized(Size),
+    Drag,
+    Resize(window::Direction),
+    Minimize,
+    ToggleMaximize,
+    CloseWindow,
     DismissError,
+    Navigate(Page),
 
     AddServer,
     EditServer(usize),
@@ -102,18 +112,33 @@ enum Message {
 
     ToggleMute,
     ToggleDeafen,
+    PushToTalk(bool),
+    SpaceBar(bool),
+    Volume(f32),
+    SaveVolume,
+    ToggleVolume,
     Disconnect,
     Join(u32),
     Draft(String),
     SendChat,
+    Pivot(Pivot),
+    /// Poll the engine: are you transmitting, and how loud.
     Tick,
+    /// Redraw an animation.
+    Frame,
+
+    SetTheme(Mode),
+    SetAccent(Accent),
+    SetReduceMotion(bool),
 }
 
 impl Blurt {
     fn new() -> (Self, Task<Message>) {
         let (_id, open) = window::open(window::Settings {
-            size: iced::Size::new(900.0, 600.0),
-            min_size: Some(iced::Size::new(360.0, 240.0)),
+            size: WINDOW,
+            min_size: Some(Size::new(360.0, 480.0)),
+            // blurt draws its own title bar.
+            decorations: false,
             ..window::Settings::default()
         });
         let dir = config::dir();
@@ -121,7 +146,7 @@ impl Blurt {
             Some(Ok(config)) => (config, None),
             Some(Err(e)) => (
                 Config::default(),
-                Some(format!("Could not read config: {e}")),
+                Some(format!("could not read the config: {e}")),
             ),
             None => (Config::default(), None),
         };
@@ -129,28 +154,55 @@ impl Blurt {
             window: None,
             dir,
             config,
-            screen: Screen::Servers(None),
+            screen: Screen::Idle,
+            page: Page::Servers,
+            editor: None,
             error,
+            width: WINDOW.width,
+            layout: Layout::for_width(WINDOW.width),
+            reflowed: None,
         };
         (app, open.map(Message::WindowOpened))
     }
 
     fn title(&self, _window: window::Id) -> String {
         match &self.screen {
-            Screen::Connected(c) => format!("{} - blurt", c.server.label),
+            Screen::Connected(c) => format!("{} - blurt", c.room.server.label),
             _ => "blurt".to_owned(),
         }
+    }
+
+    fn tokens(&self) -> Tokens {
+        Tokens::new(self.config.appearance.theme, self.config.appearance.accent)
+    }
+
+    fn theme(&self, _window: window::Id) -> iced::Theme {
+        self.tokens().iced_theme()
+    }
+
+    fn reduce_motion(&self) -> bool {
+        self.config.appearance.reduce_motion
     }
 
     fn save(&mut self) {
         if let Some(dir) = &self.dir
             && let Err(e) = config::save(dir, &self.config)
         {
-            self.error = Some(format!("Could not save config: {e}"));
+            self.error = Some(format!("could not save the config: {e}"));
+        }
+    }
+
+    fn connected(&mut self) -> Option<&mut Connected> {
+        match &mut self.screen {
+            Screen::Connected(c) => Some(c),
+            _ => None,
         }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let now = Instant::now();
+        let window = self.window;
+        let on_window = |task: fn(window::Id) -> Task<Message>| window.map_or(Task::none(), task);
         match message {
             Message::WindowOpened(id) => self.window = Some(id),
             Message::WindowClosed(id) => {
@@ -163,24 +215,38 @@ impl Blurt {
                 // TODO(milestone 5): stay alive in the tray instead.
                 return iced::exit();
             }
-            Message::DismissError => self.error = None,
-
-            Message::AddServer => {
-                self.screen = Screen::Servers(Some(Editor {
-                    port: config::DEFAULT_PORT.to_string(),
-                    ..Default::default()
-                }))
+            Message::Resized(size) => {
+                self.width = size.width;
+                let layout = self.layout.resized(size.width);
+                if layout != self.layout {
+                    self.layout = layout;
+                    self.reflowed = Some(now);
+                }
             }
+            Message::Drag => return on_window(window::drag),
+            Message::Resize(direction) => {
+                if let Some(id) = window {
+                    return window::drag_resize(id, direction);
+                }
+            }
+            Message::Minimize => {
+                if let Some(id) = window {
+                    return window::minimize(id, true);
+                }
+            }
+            Message::ToggleMaximize => return on_window(window::toggle_maximize),
+            Message::CloseWindow => return on_window(window::close),
+            Message::DismissError => self.error = None,
+            Message::Navigate(page) => {
+                if page != Page::Voice || matches!(self.screen, Screen::Connected(_)) {
+                    self.page = page;
+                }
+            }
+
+            Message::AddServer => self.editor = Some(Editor::add()),
             Message::EditServer(index) => {
                 if let Some(server) = self.config.servers.get(index) {
-                    self.screen = Screen::Servers(Some(Editor {
-                        index: Some(index),
-                        label: server.label.clone(),
-                        host: server.host.clone(),
-                        port: server.port.to_string(),
-                        username: server.username.clone(),
-                        password: server.password.clone().unwrap_or_default(),
-                    }));
+                    self.editor = Some(Editor::edit(index, server));
                 }
             }
             Message::DeleteServer(index) => {
@@ -191,18 +257,12 @@ impl Blurt {
                 }
             }
             Message::Edit(field, value) => {
-                if let Screen::Servers(Some(editor)) = &mut self.screen {
-                    *match field {
-                        Field::Label => &mut editor.label,
-                        Field::Host => &mut editor.host,
-                        Field::Port => &mut editor.port,
-                        Field::Username => &mut editor.username,
-                        Field::Password => &mut editor.password,
-                    } = value;
+                if let Some(editor) = &mut self.editor {
+                    editor.set(field, value);
                 }
             }
             Message::SaveServer => {
-                if let Screen::Servers(Some(editor)) = &self.screen {
+                if let Some(editor) = &self.editor {
                     match editor.server() {
                         Ok(server) => {
                             match editor.index {
@@ -211,21 +271,24 @@ impl Blurt {
                                 }
                                 _ => self.config.servers.push(server),
                             }
+                            self.editor = None;
                             self.save();
-                            self.screen = Screen::Servers(None);
                         }
                         Err(e) => self.error = Some(e),
                     }
                 }
             }
-            Message::CancelEdit => self.screen = Screen::Servers(None),
+            Message::CancelEdit => self.editor = None,
 
             Message::Connect(index) => {
                 if let Some(server) = self.config.servers.get(index).cloned() {
+                    if let Screen::Connected(c) = &self.screen {
+                        c.session.client.disconnect();
+                    }
                     return self.connect(server);
                 }
             }
-            Message::Cancel => self.screen = Screen::Servers(None),
+            Message::Cancel => self.screen = Screen::Idle,
             Message::Trust => {
                 if let Screen::Trust {
                     server,
@@ -239,68 +302,124 @@ impl Blurt {
                     return self.connect(server);
                 }
             }
-            Message::Session(event) => self.on_session(event),
+            Message::Session(event) => self.on_session(event, now),
 
             Message::ToggleMute => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    if c.deafened {
+                if let Some(c) = self.connected() {
+                    if c.room.deafened {
                         // Unmuting while deafened undeafens, as in the
                         // official client.
-                        c.deafened = false;
-                        c.muted = false;
+                        c.room.deafened = false;
+                        c.room.muted = false;
                         c.session.set_deafened(false, false);
                     } else {
-                        c.muted = !c.muted;
-                        c.session.set_muted(c.muted);
+                        c.room.muted = !c.room.muted;
+                        c.session.set_muted(c.room.muted);
                     }
                 }
             }
             Message::ToggleDeafen => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    c.deafened = !c.deafened;
-                    c.session.set_deafened(c.deafened, c.muted);
+                if let Some(c) = self.connected() {
+                    c.room.deafened = !c.room.deafened;
+                    c.session.set_deafened(c.room.deafened, c.room.muted);
+                }
+            }
+            Message::PushToTalk(held) => {
+                if let Some(c) = self.connected() {
+                    c.pointer_talk = held;
+                    c.apply_push_to_talk();
+                }
+            }
+            Message::SpaceBar(held) => {
+                let on_voice = self.page == Page::Voice;
+                if let Some(c) = self.connected() {
+                    // Only on the voice page, so space still works in forms.
+                    c.key_talk = held && on_voice;
+                    c.apply_push_to_talk();
+                }
+            }
+            Message::Volume(volume) => {
+                self.config.audio.output_volume = volume;
+                if let Some(c) = self.connected() {
+                    c.session.engine.set_output_volume(volume);
+                }
+            }
+            Message::SaveVolume => self.save(),
+            Message::ToggleVolume => {
+                if let Some(c) = self.connected() {
+                    c.room.volume_open = !c.room.volume_open;
                 }
             }
             Message::Disconnect => {
                 if let Screen::Connected(c) = &self.screen {
                     c.session.client.disconnect();
                 }
-                self.screen = Screen::Servers(None);
+                self.screen = Screen::Idle;
+                self.page = Page::Servers;
             }
             Message::Join(channel) => {
                 if let Screen::Connected(c) = &self.screen
                     && let Err(e) = c.session.client.set_channel(channel)
                 {
-                    self.error = Some(format!("Could not join: {e}"));
+                    self.error = Some(format!("could not join: {e}"));
                 }
             }
             Message::Draft(draft) => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    c.draft = draft;
+                if let Some(c) = self.connected() {
+                    c.room.draft = draft;
                 }
             }
             Message::SendChat => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    let draft = std::mem::take(&mut c.draft);
+                if let Some(c) = self.connected() {
+                    let draft = std::mem::take(&mut c.room.draft);
                     if !draft.trim().is_empty() {
                         match c
                             .session
                             .client
                             .send_channel_message(html::escape(&draft), None)
                         {
-                            Ok(()) => c.state = c.session.client.state().lock().unwrap().clone(),
+                            Ok(()) => c.refresh(now),
                             Err(e) => {
-                                c.draft = draft;
-                                self.error = Some(format!("Could not send: {e}"));
+                                c.room.draft = draft;
+                                self.error = Some(format!("could not send: {e}"));
                             }
                         }
                     }
                 }
             }
-            Message::Tick => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    c.transmitting = c.session.engine.stats().transmitting;
+            Message::Pivot(pivot) => {
+                if let Some(c) = self.connected()
+                    && c.room.pivot != pivot
+                {
+                    c.room.pivot = pivot;
+                    c.room.pivot_changed = Some(now);
                 }
+            }
+            Message::Tick => {
+                if let Some(c) = self.connected() {
+                    let stats = c.session.engine.stats();
+                    c.room.transmitting = stats.transmitting;
+                    c.room.mic_level = stats.mic_level;
+                    c.room.observe_talking(now);
+                }
+            }
+            Message::Frame => {
+                if let Some(c) = self.connected() {
+                    c.room.mic_level = c.session.engine.stats().mic_level;
+                }
+            }
+
+            Message::SetTheme(mode) => {
+                self.config.appearance.theme = mode;
+                self.save();
+            }
+            Message::SetAccent(accent) => {
+                self.config.appearance.accent = accent;
+                self.save();
+            }
+            Message::SetReduceMotion(reduce) => {
+                self.config.appearance.reduce_motion = reduce;
+                self.save();
             }
         }
         Task::none()
@@ -339,24 +458,27 @@ impl Blurt {
         task
     }
 
-    fn on_session(&mut self, event: session::Event) {
+    fn on_session(&mut self, event: session::Event, now: Instant) {
         use session::Event;
         match event {
             Event::Connected(session) => {
-                let screen = std::mem::replace(&mut self.screen, Screen::Servers(None));
+                let screen = std::mem::replace(&mut self.screen, Screen::Idle);
                 match screen {
                     Screen::Connecting { server, _task } => {
-                        let state = session.client.state().lock().unwrap().clone();
-                        self.screen = Screen::Connected(Box::new(Connected {
-                            server,
+                        session
+                            .engine
+                            .set_output_volume(self.config.audio.output_volume);
+                        let mut c = Connected {
                             session,
-                            state,
-                            muted: false,
-                            deafened: false,
-                            transmitting: false,
-                            draft: String::new(),
+                            room: Room::new(server),
+                            pointer_talk: false,
+                            key_talk: false,
                             _task,
-                        }));
+                        };
+                        c.refresh(now);
+                        self.screen = Screen::Connected(Box::new(c));
+                        self.page = Page::Voice;
+                        self.editor = None;
                     }
                     // Cancelled meanwhile.
                     other => {
@@ -378,8 +500,8 @@ impl Blurt {
                 }
             }
             Event::Changed => {
-                if let Screen::Connected(c) = &mut self.screen {
-                    c.state = c.session.client.state().lock().unwrap().clone();
+                if let Some(c) = self.connected() {
+                    c.refresh(now);
                 }
             }
             Event::Ended(error) => {
@@ -387,369 +509,156 @@ impl Blurt {
                     self.screen,
                     Screen::Connected(_) | Screen::Connecting { .. }
                 ) {
-                    self.screen = Screen::Servers(None);
+                    self.screen = Screen::Idle;
+                    if self.page == Page::Voice {
+                        self.page = Page::Servers;
+                    }
                     if error.is_some() {
-                        self.error = error;
+                        self.error = error.map(|e| e.to_lowercase());
                     }
                 }
             }
         }
     }
 
-    fn view(&self, _window: window::Id) -> Element<'_, Message> {
-        let screen = match &self.screen {
-            Screen::Servers(editor) => self.servers(editor.as_ref()),
-            Screen::Connecting { server, .. } => center(
-                column![
-                    text(format!("Connecting to {}...", server.label)),
-                    button("Cancel").on_press(Message::Cancel),
-                ]
-                .spacing(12)
-                .align_x(Center),
-            )
-            .into(),
-            Screen::Trust {
-                server,
-                fingerprint,
-                reason,
-            } => trust(server, fingerprint, reason),
-            Screen::Connected(c) => connected(c),
-        };
-        match &self.error {
-            Some(error) => column![
-                container(
-                    row![
-                        text(error).width(Fill),
-                        button("Dismiss")
-                            .on_press(Message::DismissError)
-                            .style(button::text),
-                    ]
-                    .align_y(Center)
-                )
-                .padding([4, 12])
-                .style(container::danger),
-                screen,
-            ]
-            .into(),
-            None => screen,
+    /// Whether anything on screen is moving, so frames are worth drawing.
+    fn animating(&self, now: Instant) -> bool {
+        let running =
+            |at: Option<Instant>, duration| at.is_some_and(|at| now.duration_since(at) < duration);
+        if self.reduce_motion() {
+            return false;
+        }
+        if running(self.reflowed, theme::motion::REFLOW) {
+            return true;
+        }
+        match &self.screen {
+            Screen::Connected(c) => {
+                running(c.room.pivot_changed, theme::motion::PIVOT)
+                    || c.room.talking.values().any(|a| a.is_animating(now))
+                    // Your meter moves while you talk.
+                    || (self.page == Page::Voice && c.room.live())
+            }
+            _ => false,
         }
     }
 
-    fn servers<'a>(&'a self, editor: Option<&'a Editor>) -> Element<'a, Message> {
-        if let Some(editor) = editor {
-            return editor.view();
+    fn view(&self, _window: window::Id) -> Element<'_, Message> {
+        let now = Instant::now();
+        let shown = self.reflowed.map_or(1.0, |at| {
+            progress(at, now, theme::motion::REFLOW, self.reduce_motion())
+        });
+        let t = self.tokens().faded(shown);
+        let connected = match &self.screen {
+            Screen::Connected(c) => Some(c.as_ref()),
+            _ => None,
+        };
+
+        let body: Element<'_, Message> = match (&self.screen, self.page) {
+            (Screen::Connected(c), Page::Voice) => voice::view(&voice::Voice {
+                t,
+                room: &c.room,
+                now,
+                width: self.width,
+                layout: self.layout,
+                reduce_motion: self.reduce_motion(),
+                volume: self.config.audio.output_volume,
+            }),
+            (_, Page::Settings) => self.page_with_nav(t, pages::settings(t, &self.config)),
+            (Screen::Connecting { server, .. }, _) => {
+                self.page_with_nav(t, pages::connecting(t, server))
+            }
+            (
+                Screen::Trust {
+                    server,
+                    fingerprint,
+                    reason,
+                },
+                _,
+            ) => self.page_with_nav(t, pages::trust(t, server, fingerprint, reason)),
+            (_, _) => self.page_with_nav(
+                t,
+                match &self.editor {
+                    Some(editor) => pages::editor(t, editor),
+                    None => pages::servers(t, &self.config, connected.map(|c| &c.room.server)),
+                },
+            ),
+        };
+
+        let mut page = column![chrome::title_bar(t, None)];
+        if let Some(error) = &self.error {
+            page = page.push(pages::error_banner(t, error));
         }
-        let mut list = column![].spacing(8);
-        if self.config.servers.is_empty() {
-            list = list.push(text("No servers yet."));
-        }
-        for (i, server) in self.config.servers.iter().enumerate() {
-            list = list.push(
-                container(
-                    row![
-                        column![
-                            text(&server.label).font(Font {
-                                weight: iced::font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }),
-                            text(format!("{}@{}", server.username, server.address())).size(13),
-                        ]
-                        .width(Fill),
-                        button("Connect").on_press(Message::Connect(i)),
-                        button("Edit")
-                            .on_press(Message::EditServer(i))
-                            .style(button::secondary),
-                        button("Delete")
-                            .on_press(Message::DeleteServer(i))
-                            .style(button::danger),
-                    ]
-                    .spacing(8)
-                    .align_y(Center),
-                )
-                .padding(12)
-                .style(container::rounded_box),
-            );
-        }
-        let page = column![
-            row![
-                text("Servers").size(24).width(Fill),
-                button("Add server").on_press(Message::AddServer),
-            ]
-            .align_y(Center),
-            scrollable(list),
+        let page = container(page.push(body))
+            .width(Fill)
+            .height(Fill)
+            .style(theme::fill(t.bg));
+        chrome::with_resize_edges(page.into())
+    }
+
+    fn page_with_nav<'a>(
+        &'a self,
+        t: Tokens,
+        content: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let server = match &self.screen {
+            Screen::Connected(c) => Some(c.room.server.label.as_str()),
+            _ => None,
+        };
+        column![
+            voice::nav_row(
+                t,
+                self.page,
+                matches!(self.screen, Screen::Connected(_)),
+                server
+            ),
+            content,
         ]
-        .spacing(16)
-        .max_width(640);
-        container(page).padding(24).center_x(Fill).into()
+        .height(Fill)
+        .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let closed = window::close_events().map(Message::WindowClosed);
-        match self.screen {
-            // For the talking indicator; only while connected.
-            Screen::Connected(_) => Subscription::batch([
-                closed,
-                iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
-            ]),
-            _ => closed,
+        let mut subscriptions = vec![
+            window::close_events().map(Message::WindowClosed),
+            window::resize_events().map(|(_, size)| Message::Resized(size)),
+        ];
+        if let Screen::Connected(_) = self.screen {
+            // Transmit state, your level and the talking line's times; only
+            // while connected.
+            subscriptions
+                .push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick));
+            subscriptions.push(keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Space),
+                    repeat: false,
+                    ..
+                } => Some(Message::SpaceBar(true)),
+                keyboard::Event::KeyReleased {
+                    key: keyboard::Key::Named(keyboard::key::Named::Space),
+                    ..
+                } => Some(Message::SpaceBar(false)),
+                _ => None,
+            }));
         }
+        if self.animating(Instant::now()) {
+            subscriptions.push(iced::time::every(FRAME).map(|_| Message::Frame));
+        }
+        Subscription::batch(subscriptions)
     }
 }
 
-impl Editor {
-    fn server(&self) -> Result<Server, String> {
-        let host = self.host.trim();
-        if host.is_empty() {
-            return Err("The server needs an address".into());
-        }
-        let username = self.username.trim();
-        if username.is_empty() {
-            return Err("Pick a username".into());
-        }
-        let port = match self.port.trim() {
-            "" => config::DEFAULT_PORT,
-            port => port.parse().map_err(|_| format!("{port:?} isn't a port"))?,
-        };
-        let label = match self.label.trim() {
-            "" => host,
-            label => label,
-        };
-        Ok(Server {
-            label: label.to_owned(),
-            host: host.to_owned(),
-            port,
-            username: username.to_owned(),
-            password: (!self.password.is_empty()).then(|| self.password.clone()),
-        })
+impl Connected {
+    /// Re-reads the client's state after it changed.
+    fn refresh(&mut self, now: Instant) {
+        let state = self.session.client.state().lock().unwrap().clone();
+        self.room.update(state, now);
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let field = |label: &'static str, value: &str, field: Field| {
-            column![
-                text(label).size(13),
-                text_input("", value)
-                    .on_input(move |v| Message::Edit(field.clone(), v))
-                    .on_submit(Message::SaveServer),
-            ]
-            .spacing(4)
-        };
-        let form = column![
-            text(if self.index.is_some() {
-                "Edit server"
-            } else {
-                "Add server"
-            })
-            .size(24),
-            field("Address", &self.host, Field::Host),
-            field("Port", &self.port, Field::Port),
-            field("Username", &self.username, Field::Username),
-            column![
-                text("Password (if the server has one)").size(13),
-                text_input("", &self.password)
-                    .secure(true)
-                    .on_input(|v| Message::Edit(Field::Password, v))
-                    .on_submit(Message::SaveServer),
-            ]
-            .spacing(4),
-            field("Name (optional)", &self.label, Field::Label),
-            row![
-                button("Save").on_press(Message::SaveServer),
-                button("Cancel")
-                    .on_press(Message::CancelEdit)
-                    .style(button::secondary),
-            ]
-            .spacing(8),
-        ]
-        .spacing(12)
-        .max_width(480);
-        container(form).padding(24).center_x(Fill).into()
+    fn apply_push_to_talk(&self) {
+        self.session
+            .engine
+            .set_push_to_talk(self.pointer_talk || self.key_talk);
     }
-}
-
-fn trust<'a>(
-    server: &'a Server,
-    fingerprint: &Fingerprint,
-    reason: &'a str,
-) -> Element<'a, Message> {
-    center(
-        column![
-            text(format!(
-                "{} isn't using a certificate blurt can verify.",
-                server.label
-            ))
-            .size(18),
-            text(format!("({reason})")).size(13),
-            text("Its certificate's SHA-256 fingerprint is:"),
-            text(fingerprint.to_string()).font(Font::MONOSPACE).size(13),
-            text(
-                "If you trust this server, blurt will remember the certificate and \
-                 warn you if it ever changes."
-            ),
-            row![
-                button("Trust and connect").on_press(Message::Trust),
-                button("Cancel")
-                    .on_press(Message::Cancel)
-                    .style(button::secondary),
-            ]
-            .spacing(8),
-        ]
-        .spacing(12)
-        .max_width(560),
-    )
-    .padding(24)
-    .into()
-}
-
-fn connected(c: &Connected) -> Element<'_, Message> {
-    let me = c.state.current_user();
-    let toolbar = row![
-        text(&c.server.label).size(18),
-        text(if c.transmitting { "talking" } else { "" }).size(13),
-        space::horizontal(),
-        toggle(
-            if c.muted || c.deafened {
-                "Unmute"
-            } else {
-                "Mute"
-            },
-            c.muted || c.deafened,
-            Message::ToggleMute
-        ),
-        toggle(
-            if c.deafened { "Undeafen" } else { "Deafen" },
-            c.deafened,
-            Message::ToggleDeafen
-        ),
-        button("Disconnect")
-            .on_press(Message::Disconnect)
-            .style(button::secondary),
-    ]
-    .spacing(8)
-    .align_y(Center);
-
-    let mut tree = column![].spacing(2);
-    for (depth, channel) in channel_order(&c.state) {
-        let here = me.is_some_and(|me| me.channel_id == channel.channel_id);
-        let name = text(&channel.name).font(Font {
-            weight: if here {
-                iced::font::Weight::Bold
-            } else {
-                iced::font::Weight::Normal
-            },
-            ..Font::DEFAULT
-        });
-        tree = tree.push(row![
-            space().width(depth as f32 * 16.0),
-            button(name)
-                .on_press(Message::Join(channel.channel_id))
-                .style(button::text)
-                .padding([2, 4]),
-        ]);
-        let mut users: Vec<_> = c
-            .state
-            .users
-            .values()
-            .filter(|u| u.channel_id == channel.channel_id)
-            .collect();
-        users.sort_by_key(|u| u.name.to_lowercase());
-        for user in users {
-            let speaking = if user.is_me {
-                c.transmitting
-            } else {
-                user.is_speaking
-            };
-            let mut flags = Vec::new();
-            if user.self_deaf || user.deaf {
-                flags.push("deafened");
-            } else if user.self_mute || user.mute || user.suppress {
-                flags.push("muted");
-            }
-            let marker = if speaking { "●" } else { "○" };
-            tree = tree.push(
-                row![
-                    space().width(depth as f32 * 16.0 + 12.0),
-                    text(marker)
-                        .size(12)
-                        .style(move |theme: &iced::Theme| text::Style {
-                            color: Some(if speaking {
-                                theme.extended_palette().success.base.color
-                            } else {
-                                theme.extended_palette().background.strong.color
-                            }),
-                        }),
-                    text(&user.name).font(Font {
-                        weight: if user.is_me {
-                            iced::font::Weight::Bold
-                        } else {
-                            iced::font::Weight::Normal
-                        },
-                        ..Font::DEFAULT
-                    }),
-                    text(flags.join(", ")).size(12),
-                ]
-                .spacing(6)
-                .align_y(Center),
-            );
-        }
-    }
-
-    let mut log = column![].spacing(4);
-    for message in c.state.chat_messages() {
-        log = log.push(match message {
-            TextMessage::ChatTextMessage(m) => {
-                let from = m
-                    .actor
-                    .and_then(|s| c.state.users.get(&s))
-                    .map_or("server", |u| u.name.as_str());
-                row![
-                    text(format!("{from}:")).font(Font {
-                        weight: iced::font::Weight::Bold,
-                        ..Font::DEFAULT
-                    }),
-                    text(html::to_text(&m.content)),
-                ]
-                .spacing(6)
-            }
-            TextMessage::ServerTextMessage(m) => row![text(html::to_text(&m.content)).size(13)],
-        });
-    }
-    let channel = me
-        .and_then(|me| c.state.channels.get(&me.channel_id))
-        .map_or("", |ch| ch.name.as_str());
-    let chat = column![
-        scrollable(log).anchor_bottom().height(Fill).width(Fill),
-        text_input(&format!("Message {channel}"), &c.draft)
-            .on_input(Message::Draft)
-            .on_submit(Message::SendChat),
-    ]
-    .spacing(8);
-
-    column![
-        toolbar,
-        row![
-            container(scrollable(tree).width(Fill))
-                .width(FillPortion(2))
-                .height(Fill)
-                .padding(8)
-                .style(container::bordered_box),
-            container(chat).width(FillPortion(3)).height(Fill),
-        ]
-        .spacing(12),
-    ]
-    .spacing(12)
-    .padding(12)
-    .into()
-}
-
-fn toggle(label: &str, on: bool, message: Message) -> Element<'_, Message> {
-    button(text(label))
-        .on_press(message)
-        .style(if on {
-            button::danger
-        } else {
-            button::secondary
-        })
-        .into()
 }
 
 /// Channels depth-first from the root, siblings by name, with their depth.

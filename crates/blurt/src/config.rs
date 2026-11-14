@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use mumble_protocol::client::{ClientIdentity, Fingerprint};
 use serde::{Deserialize, Serialize};
 
+use crate::theme::{Accent, Mode};
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -15,6 +17,30 @@ pub struct Config {
     /// Server certificates the user chose to trust, by `host:port`, as hex
     /// SHA-256 fingerprints.
     pub trusted: BTreeMap<String, String>,
+    pub appearance: Appearance,
+    pub audio: Audio,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: Mode,
+    pub accent: Accent,
+    /// Stops continuous animation (meters, glow); state changes still show.
+    pub reduce_motion: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Audio {
+    /// Master output volume, 0 to 1.
+    pub output_volume: f32,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self { output_volume: 1.0 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +169,17 @@ mod tests {
             config.trusted_certificate(&server()),
             Some(Fingerprint([0xab; 32]))
         );
+    }
+
+    #[test]
+    fn old_configs_get_default_appearance() {
+        let config: Config = toml::from_str("servers = []").unwrap();
+        assert_eq!(config.appearance, Appearance::default());
+        assert_eq!(config.audio.output_volume, 1.0);
+        let config: Config =
+            toml::from_str("[appearance]\ntheme = \"light\"\naccent = \"acid\"").unwrap();
+        assert_eq!(config.appearance.theme, Mode::Light);
+        assert_eq!(config.appearance.accent, Accent::Acid);
     }
 
     #[test]
