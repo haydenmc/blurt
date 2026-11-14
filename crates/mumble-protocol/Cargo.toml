@@ -18,6 +18,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.53.3", features = ["net", "macros", "time", "sync", "rt", "io-util"] }
 tokio-rustls = "0.26.6"
+aws-lc-rs = "1.19"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs"] }
+rustls-native-certs = "0.8"
 tokio-util = { version = "0.7.20", features = ["codec"] }
 
 [build-dependencies]

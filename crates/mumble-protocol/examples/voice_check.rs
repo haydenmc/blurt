@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use mumble_protocol::client::{ConnectionOptions, connect};
+use mumble_protocol::client::{Connection, ConnectionOptions, MumbleConnectionError, connect};
 
 const PACKETS: u64 = 50;
 
@@ -28,14 +28,11 @@ async fn main() {
         port,
         password: password.clone(),
         username: Some(name.to_string()),
+        ..Default::default()
     };
 
-    let talker = connect(options("blurt-talker"))
-        .await
-        .expect("talker connects");
-    let mut listener = connect(options("blurt-listener"))
-        .await
-        .expect("listener connects");
+    let talker = connect_trusting(options("blurt-talker")).await;
+    let mut listener = connect_trusting(options("blurt-listener")).await;
 
     let start = Instant::now();
     while !(talker.client.is_voice_over_udp() && listener.client.is_voice_over_udp())
@@ -75,5 +72,22 @@ async fn main() {
     listener.client.disconnect();
     if received < PACKETS {
         std::process::exit(1);
+    }
+}
+
+/// Connects, trusting whatever certificate the server presents (test servers
+/// are self-signed). A real client asks the user first.
+async fn connect_trusting(options: ConnectionOptions) -> Connection {
+    match connect(options.clone()).await {
+        Ok(connection) => connection,
+        Err(MumbleConnectionError::UntrustedCertificate { fingerprint, .. }) => {
+            connect(ConnectionOptions {
+                pinned_certificate: Some(fingerprint),
+                ..options
+            })
+            .await
+            .expect("connects with the certificate pinned")
+        }
+        Err(e) => panic!("connect failed: {e}"),
     }
 }

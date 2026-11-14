@@ -37,8 +37,10 @@ pub struct User {
     // Whether the user is recording
     pub recording: bool,
 
+    // The user's registration ID; `None` for unregistered users.
+    pub user_id: Option<u32>,
+
     // actor?
-    // user_id?
     // texture?
     // comment?
     // hash?
@@ -290,6 +292,7 @@ impl MumbleState {
                 merge(&mut user.self_deaf, m.self_deaf);
                 merge(&mut user.priority_speaker, m.priority_speaker);
                 merge(&mut user.recording, m.recording);
+                merge(&mut user.user_id, m.user_id.map(Some));
                 log::info!("Updated user: {} (session: {})", user.name, user.session);
                 return Ok(Some(MumbleEvent::UsersChanged));
             }

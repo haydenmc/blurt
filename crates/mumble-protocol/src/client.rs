@@ -17,7 +17,8 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-mod accept_any_cert;
+mod tls;
+pub use tls::{ClientIdentity, Fingerprint};
 
 use crate::udp::{Datagram, UdpVoice};
 use crate::{
@@ -63,6 +64,10 @@ pub struct Connection {
 
     // General server events, like users joining, leaving, & updating.
     pub events: mpsc::UnboundedReceiver<crate::state::MumbleEvent>,
+
+    /// The server's certificate, so the app can show it or pin it for next
+    /// time. `None` only when not connected over TLS (in tests).
+    pub server_certificate: Option<Fingerprint>,
 }
 
 #[derive(Debug, Error)]
@@ -75,6 +80,14 @@ pub enum MumbleConnectionError {
 
     #[error("TLS error: {0}")]
     TlsError(#[from] rustls::Error),
+
+    /// The server's certificate is neither CA-signed nor the pinned one. Ask
+    /// the user whether to trust `fingerprint`, then retry with it pinned.
+    #[error("Untrusted server certificate {fingerprint} ({reason})")]
+    UntrustedCertificate {
+        fingerprint: Fingerprint,
+        reason: String,
+    },
 
     #[error("Unexpected server close")]
     UnexpectedServerClose,
@@ -89,6 +102,7 @@ pub enum MumbleConnectionError {
     ProstEncodeError(#[from] prost::EncodeError),
 }
 
+#[derive(Clone, Default)]
 pub struct ConnectionOptions {
     // URL to Server, e.g. "mywebsite.chat"
     pub server: String,
@@ -101,6 +115,14 @@ pub struct ConnectionOptions {
 
     // Username to use
     pub username: Option<String>,
+
+    /// The server certificate the user chose to trust last time, if any.
+    /// CA-signed certificates are trusted without one.
+    pub pinned_certificate: Option<Fingerprint>,
+
+    /// The client certificate to authenticate with. Registered users are
+    /// recognized by it; without one, the user can't register.
+    pub identity: Option<ClientIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,13 +209,25 @@ pub async fn connect(options: ConnectionOptions) -> Result<Connection, MumbleCon
     // Voice goes over UDP to the same address the TCP connection reached.
     let udp_server = tcp.peer_addr()?;
 
-    // TODO: we accept any cert because many servers self-sign. We should figure
-    // out how to handle this better.
-    let tls = accept_any_cert::make_connector()?
-        .connect(server_name, tcp)
-        .await?;
+    let tls = tls::make_connector(options.pinned_certificate, options.identity.as_ref())?;
+    let stream = match tls.connector.connect(server_name, tcp).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            let seen = *tls.seen.lock().unwrap();
+            return Err(match (tls::certificate_error(&e), seen) {
+                (Some(reason), Some(fingerprint)) => MumbleConnectionError::UntrustedCertificate {
+                    fingerprint,
+                    reason: format!("{reason:?}"),
+                },
+                _ => e.into(),
+            });
+        }
+    };
+    let server_certificate = *tls.seen.lock().unwrap();
 
-    connect_over(tls, options, Some(udp_server)).await
+    let mut connection = connect_over(stream, options, Some(udp_server)).await?;
+    connection.server_certificate = server_certificate;
+    Ok(connection)
 }
 
 /// Runs the Mumble handshake and starts the connection over an already-open
@@ -342,6 +376,7 @@ async fn connect_over(
         events: events_rx,
         debug: debug_rx,
         audio: audio_rx,
+        server_certificate: None,
     })
 }
 
@@ -694,6 +729,24 @@ impl MumbleClient {
         }
     }
 
+    /// Asks the server to register us under our current name, tied to our
+    /// client certificate. Needs an identity and the "Register Self" permission.
+    pub fn register_self(&self) -> Result<(), MumbleConnectionError> {
+        let session = self
+            .state
+            .lock()
+            .unwrap()
+            .current_user_session
+            .ok_or(MumbleConnectionError::Disconnected)?;
+        self.send(crate::ClientToServerMessage::UserState(Box::new(
+            crate::raw::UserState {
+                session: Some(session),
+                user_id: Some(0),
+                ..Default::default()
+            },
+        )))
+    }
+
     fn send(&self, message: crate::ClientToServerMessage) -> Result<(), MumbleConnectionError> {
         self.outgoing
             .send(message)
@@ -819,6 +872,7 @@ mod tests {
             port: None,
             password: Some("hunter2".to_string()),
             username: Some("me".to_string()),
+            ..Default::default()
         }
     }
 

@@ -10,6 +10,7 @@
     "self_deaf": false,
     "priority_speaker": false,
     "recording": false,
+    "user_id": null,
     "is_me": false,
     "is_speaking": false
   }
