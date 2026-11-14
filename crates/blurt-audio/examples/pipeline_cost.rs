@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use blurt_audio::FRAME_SAMPLES;
-use blurt_audio::capture::{Capture, Processing, TransmitMode};
+use blurt_audio::capture::{Capture, NoiseSuppression, Processing, TransmitMode};
 use blurt_audio::codec::EncoderConfig;
 
 const WARMUP: usize = 300;
@@ -32,11 +32,7 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0002);
 
-    let none = Processing {
-        echo_cancellation: false,
-        noise_suppression: false,
-        auto_gain: false,
-    };
+    let none = Processing::NONE;
     let all = Processing::default();
     let configs = [
         ("voice detector only", none),
@@ -50,7 +46,7 @@ fn main() {
         (
             "+ noise suppression",
             Processing {
-                noise_suppression: true,
+                noise_suppression: NoiseSuppression::High,
                 ..none
             },
         ),
@@ -62,6 +58,13 @@ fn main() {
             },
         ),
         ("everything (default)", all),
+        (
+            "everything, RNNoise",
+            Processing {
+                noise_suppression: NoiseSuppression::Rnnoise,
+                ..all
+            },
+        ),
     ];
 
     let mut seed = 1u64;
