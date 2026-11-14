@@ -8,3 +8,14 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
+log = "0.4"
+nnnoiseless = { version = "0.5.2", default-features = false }
+opus = "0.4.0"
+rtrb = "0.4.1"
+rubato = "1"
+sonora = "0.3"
+# sonora's internal neural voice detector, which sonora itself doesn't expose.
+sonora-agc2 = "0.3"
+sonora-simd = "0.3"
+thiserror = "2"
