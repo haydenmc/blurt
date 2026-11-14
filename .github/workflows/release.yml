@@ -11,7 +11,7 @@ jobs:
   tarball:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check the tag matches the version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -36,7 +36,7 @@ jobs:
           cp target/release/blurt LICENSE README.md "$dir"/
           cp packaging/io.github.haydenmc.blurt.desktop packaging/icons/io.github.haydenmc.blurt.svg "$dir"/
           tar -czf blurt-x86_64-linux.tar.gz "$dir"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tarball
           path: blurt-x86_64-linux.tar.gz
@@ -47,7 +47,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true

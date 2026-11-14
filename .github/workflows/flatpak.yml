@@ -11,13 +11,13 @@ jobs:
   cargo-sources:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install generator dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3-aiohttp python3-tomlkit
       - run: scripts/flatpak-sources.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cargo-sources
           path: packaging/flatpak/cargo-sources.json
@@ -29,8 +29,8 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
       options: --privileged
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: cargo-sources
           path: packaging/flatpak
@@ -44,7 +44,7 @@ jobs:
           manifest-path: packaging/flatpak/io.github.haydenmc.blurt.yml
           cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'packaging/flatpak/*.yml') }}
           upload-artifact: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak
           path: blurt.flatpak
