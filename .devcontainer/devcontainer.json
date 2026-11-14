@@ -1,0 +1,56 @@
+{
+  "name": "blurt",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USERNAME": "dev",
+      "USER_UID": "1000",
+      "USER_GID": "1000"
+    }
+  },
+
+  "remoteUser": "dev",
+  "containerUser": "dev",
+  // Rootless podman: keep-id maps host UID 1000 -> container UID 1000 directly,
+  // so devcontainer UID rewriting isn't needed.
+  "updateRemoteUserUID": false,
+
+  "runArgs": [
+    "--userns=keep-id:uid=1000,gid=1000",
+    // SELinux would otherwise block the workspace/socket bind mounts.
+    "--security-opt=label=disable",
+    // GPU render nodes (Mesa drivers; software lavapipe as fallback).
+    "--device=/dev/dri"
+  ],
+
+  "mounts": [
+    // Host Wayland compositor socket, so GPUI windows show on the host desktop.
+    "source=${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY},target=/run/user/1000/${localEnv:WAYLAND_DISPLAY},type=bind",
+    // Host PipeWire-Pulse socket for audio in/out.
+    "source=${localEnv:XDG_RUNTIME_DIR}/pulse,target=/run/user/1000/pulse,type=bind",
+    // Host D-Bus session bus, for the tray (StatusNotifierItem) and XDG portals (global shortcuts).
+    "source=${localEnv:XDG_RUNTIME_DIR}/bus,target=/run/user/1000/bus,type=bind",
+    // Persist Claude Code login/config and the cargo cache across rebuilds.
+    "source=blurt-claude,target=/home/dev/.claude,type=volume",
+    "source=blurt-cargo-registry,target=/home/dev/.cargo/registry,type=volume",
+    "source=blurt-cargo-git,target=/home/dev/.cargo/git,type=volume"
+  ],
+
+  "containerEnv": {
+    "XDG_RUNTIME_DIR": "/run/user/1000",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+    "PULSE_SERVER": "unix:/run/user/1000/pulse/native",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    "CLAUDE_CONFIG_DIR": "/home/dev/.claude"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  }
+}

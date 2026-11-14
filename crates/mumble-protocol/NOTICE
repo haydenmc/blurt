@@ -1,0 +1,5 @@
+This crate is forked from the `mumble-protocol` crate in Mumbo
+(https://github.com/citelao/mumbo), commit f16c00319bb2a42fce73a2dbe7ff8b2cd07c418e,
+Copyright (c) citelao and Mumbo contributors, licensed AGPL-3.0-or-later.
+
+Modifications for blurt are likewise licensed AGPL-3.0-or-later.

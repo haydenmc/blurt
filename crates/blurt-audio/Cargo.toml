@@ -1,0 +1,10 @@
+[package]
+name = "blurt-audio"
+description = "Real-time audio engine for blurt: capture, DSP, Opus, jitter buffering, mixing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
