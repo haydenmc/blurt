@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpipewire-0.3-dev libspa-0.2-dev libclang-dev pipewire-bin \
         # Mumble: protobuf (prost-build) and Opus codec
         protobuf-compiler libopus-dev \
+        # local Mumble server to test against (see dev/mumble-server)
+        mumble-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Send ALSA's default device to the host's Pulse/PipeWire socket.
