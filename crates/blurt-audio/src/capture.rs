@@ -106,11 +106,28 @@ impl Processing {
     }
 }
 
+/// Gain after the adaptive controller. On its own the adaptive controller
+/// leaves speech around -27 dBFS (it keeps peaks well below full scale);
+/// with this, about -21, closer to other voice chat. The limiter that
+/// follows turns it into a compressor, so peaks still stay in range.
+const MAKEUP_GAIN_DB: f32 = 10.0;
+/// The final level is trimmed this far below full scale, so the encoder
+/// and the listener's decoder have room for peaks.
+const OUTPUT_TRIM: f32 = 0.891; // -1 dB
+
 fn gain_controller(processing: Processing) -> Option<GainController2> {
     // The default controller only limits; the adaptive part is what raises
     // a quiet mic.
     processing.auto_gain.then(|| GainController2 {
-        adaptive_digital: Some(AdaptiveDigital::default()),
+        adaptive_digital: Some(AdaptiveDigital {
+            // It caps its gain so background noise stays under this; the
+            // makeup gain comes on top.
+            max_output_noise_level_dbfs: -50.0 - MAKEUP_GAIN_DB,
+            ..Default::default()
+        }),
+        fixed_digital: sonora::config::FixedDigital {
+            gain_db: MAKEUP_GAIN_DB,
+        },
         ..Default::default()
     })
 }
@@ -476,6 +493,9 @@ impl Capture {
             if let Err(e) = self.gain.process_capture_f32(&[&input], &mut [&mut frame]) {
                 log::debug!("Gain control failed: {e}");
                 frame = input;
+            }
+            for sample in &mut frame {
+                *sample *= OUTPUT_TRIM;
             }
         }
 
