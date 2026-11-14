@@ -13,6 +13,7 @@ pub mod client;
 pub mod codec;
 pub mod crypt;
 pub mod state;
+mod udp;
 
 pub trait TcpMessageId: prost::Message + Default {
     const TYPE_ID: u16;
@@ -226,6 +227,7 @@ pub enum ClientToServerMessage {
     Ping(raw::Ping),
     TextMessage(raw::TextMessage),
     UserState(Box<raw::UserState>),
+    CryptSetup(raw::CryptSetup),
 }
 
 impl ClientToServerMessage {
@@ -248,6 +250,9 @@ impl ClientToServerMessage {
             }
             ClientToServerMessage::UserState(msg) => {
                 Ok((raw::UserState::TYPE_ID, msg.encode_to_vec()))
+            }
+            ClientToServerMessage::CryptSetup(msg) => {
+                Ok((raw::CryptSetup::TYPE_ID, msg.encode_to_vec()))
             }
         }
     }
