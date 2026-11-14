@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Writes packaging/flatpak/cargo-sources.json from Cargo.lock, so the Flatpak
-# build can fetch every crate offline. Needs python3 with aiohttp and toml
-# (Debian: python3-aiohttp python3-toml).
+# build can fetch every crate offline. Needs python3 with aiohttp and tomlkit
+# (Debian: python3-aiohttp python3-tomlkit).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 # flatpak-builder-tools, pinned.

@@ -55,7 +55,7 @@ pushing a `v*` tag builds it and the tarball and publishes a GitHub release.
 To build it yourself, outside a container (bubblewrap doesn't run in one):
 
 ```bash
-scripts/flatpak-sources.sh   # crate list for the offline build; needs python3-aiohttp, python3-toml
+scripts/flatpak-sources.sh   # crate list for the offline build; needs python3-aiohttp, python3-tomlkit
 flatpak-builder --user --install-deps-from=flathub --force-clean \
   build-dir packaging/flatpak/io.github.haydenmc.blurt.yml
 ```
