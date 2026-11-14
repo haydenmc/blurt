@@ -20,6 +20,7 @@ use crate::capture::{Capture, Processing, TransmitMode};
 use crate::codec::EncoderConfig;
 use crate::jitter::JitterConfig;
 use crate::mixer::{Mixer, SpeakerSettings};
+use crate::recorder::{Recorder, Track};
 use crate::resample::Resampler;
 use crate::{Closed, FRAME_SAMPLES, SAMPLE_RATE, VoiceSink, VoiceSource};
 
@@ -46,6 +47,8 @@ pub enum AudioError {
     Opus(#[from] opus::Error),
     #[error("resampler error: {0}")]
     Resampler(#[from] rubato::ResamplerConstructionError),
+    #[error("could not record audio: {0}")]
+    Recording(#[from] std::io::Error),
     #[error("the audio thread stopped unexpectedly")]
     ThreadDied,
 }
@@ -127,6 +130,10 @@ pub struct EngineConfig {
     pub device_buffer_frames: u32,
     /// How much mixed audio to keep queued for the output device.
     pub playback_buffer: Duration,
+    /// For diagnosing audio problems: record the raw mic, the processed mic,
+    /// what was sent and what was played into WAV files in this directory,
+    /// all on one timeline.
+    pub record_to: Option<std::path::PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -142,6 +149,7 @@ impl Default for EngineConfig {
             // 5 ms.
             device_buffer_frames: 240,
             playback_buffer: Duration::from_millis(10),
+            record_to: None,
         }
     }
 }
@@ -603,6 +611,7 @@ struct Dsp {
     /// Output ring level to keep, in device samples.
     playback_target: usize,
     speaker_capacity: usize,
+    recorder: Option<Recorder>,
 }
 
 impl Dsp {
@@ -614,6 +623,11 @@ impl Dsp {
             speaker_resampler: Resampler::new(SAMPLE_RATE, devices.output_rate)?,
             playback_target: playback_target(config, devices),
             speaker_capacity: devices.speaker.buffer().capacity(),
+            recorder: config
+                .record_to
+                .as_deref()
+                .map(Recorder::start)
+                .transpose()?,
         })
     }
 
@@ -678,6 +692,9 @@ impl Dsp {
                 } else {
                     speakers = Some(0);
                 }
+                if let Some(recorder) = &mut self.recorder {
+                    recorder.push(Track::Playback, &frame);
+                }
                 // Everything played is the echo canceller's reference.
                 // Deafened, nothing plays, so there is no echo to cancel.
                 if !deafened {
@@ -708,6 +725,18 @@ impl Dsp {
                     .try_into()
                     .expect("exactly one frame");
                 let report = self.capture.capture(frame, push_to_talk, muted, &mut sink);
+                if let Some(recorder) = &mut self.recorder {
+                    let processed = self.capture.processed();
+                    recorder.push(Track::MicRaw, frame);
+                    recorder.push(Track::MicProcessed, processed);
+                    let silence = [0.0; FRAME_SAMPLES];
+                    let sent = if report.transmitting {
+                        processed
+                    } else {
+                        &silence
+                    };
+                    recorder.push(Track::Sent, sent);
+                }
                 consumed += FRAME_SAMPLES;
                 shared
                     .mic_level_db
@@ -730,6 +759,9 @@ impl Dsp {
                 last_housekeeping = Instant::now();
                 self.mixer.prune(tick_start);
                 if log::log_enabled!(log::Level::Debug) {
+                    if let Some(echo) = self.capture.echo_stats() {
+                        log::debug!("Echo canceller: {echo:?}");
+                    }
                     for (session, stats, delay) in self.mixer.speaker_stats() {
                         log::debug!(
                             "Speaker {session}: played {}, recovered {}, concealed {}, \

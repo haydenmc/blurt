@@ -72,6 +72,24 @@ fn sonora_config(processing: Processing) -> Config {
     }
 }
 
+/// The echo canceller's statistics, for diagnostics. Each is `None` until
+/// it has enough to go on.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EchoStats {
+    /// How much quieter the echo is than what was played (speakers to
+    /// mic), in dB.
+    pub return_loss_db: Option<f64>,
+    /// How much the canceller removed of the echo that reached the mic,
+    /// in dB. Higher is better; under ~10 dB, echo is getting through.
+    pub return_loss_enhancement_db: Option<f64>,
+    /// How often its filter diverged in the last second (0 to 1).
+    pub divergent_fraction: Option<f64>,
+    /// Its estimate of the delay from playing to hearing the echo.
+    pub delay_ms: Option<i32>,
+    /// How likely it is that echo remains after cancellation (0 to 1).
+    pub residual_echo_likelihood: Option<f64>,
+}
+
 /// What happened to one mic frame, for meters and indicators.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FrameReport {
@@ -145,6 +163,8 @@ pub struct Capture {
     frame_counter: u64,
     packet: [u8; 1500],
     scratch: [f32; FRAME_SAMPLES],
+    /// The last frame after all processing, before the gate.
+    processed: [f32; FRAME_SAMPLES],
 }
 
 impl Capture {
@@ -179,6 +199,7 @@ impl Capture {
             frame_counter: 0,
             packet: [0; 1500],
             scratch: [0.0; FRAME_SAMPLES],
+            processed: [0.0; FRAME_SAMPLES],
         })
     }
 
@@ -214,6 +235,28 @@ impl Capture {
         {
             log::debug!("Echo canceller render failed: {e}");
         }
+    }
+
+    /// The last mic frame after all processing, before the gate decided
+    /// whether to send it. Silence while muted.
+    pub fn processed(&self) -> &[f32; FRAME_SAMPLES] {
+        &self.processed
+    }
+
+    /// The echo canceller's view of how it's doing; `None` while echo
+    /// cancellation is off.
+    pub fn echo_stats(&self) -> Option<EchoStats> {
+        if !self.processing.echo_cancellation {
+            return None;
+        }
+        let stats = self.apm.statistics();
+        Some(EchoStats {
+            return_loss_db: stats.echo_return_loss,
+            return_loss_enhancement_db: stats.echo_return_loss_enhancement,
+            divergent_fraction: stats.divergent_filter_fraction,
+            delay_ms: stats.delay_ms,
+            residual_echo_likelihood: stats.residual_echo_likelihood,
+        })
     }
 
     /// Processes one 10 ms mic frame and sends it if the gate is open.
@@ -274,6 +317,7 @@ impl Capture {
             Transmit::End => self.queue(&frame, frame_number, true, sink),
         }
 
+        self.processed = frame;
         FrameReport {
             level_db: level_db(&frame),
             speech,
@@ -292,6 +336,7 @@ impl Capture {
         let frame_number = self.frame_counter;
         self.frame_counter += 1;
         self.preroll_len = 0;
+        self.processed = [0.0; FRAME_SAMPLES];
         let ending = self.gate.is_open();
         if ending {
             self.gate = Gate::default();

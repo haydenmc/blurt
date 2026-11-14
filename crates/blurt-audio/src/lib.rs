@@ -13,6 +13,7 @@ pub mod codec;
 pub mod engine;
 pub mod jitter;
 pub mod mixer;
+mod recorder;
 pub mod resample;
 
 pub use engine::{
