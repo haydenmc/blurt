@@ -20,6 +20,7 @@ comes first; Windows and macOS builds are planned later.
 ```bash
 cargo run -p blurt
 cargo test --workspace
+scripts/check.sh   # what CI runs: fmt, clippy with warnings as errors, tests
 ```
 
 Run a local server to test against: see [`dev/mumble-server`](dev/mumble-server/README.md).
