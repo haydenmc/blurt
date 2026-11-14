@@ -28,6 +28,8 @@
     "source=${localEnv:XDG_RUNTIME_DIR}/${localEnv:WAYLAND_DISPLAY},target=/run/user/1000/${localEnv:WAYLAND_DISPLAY},type=bind",
     // Host PipeWire-Pulse socket for audio in/out.
     "source=${localEnv:XDG_RUNTIME_DIR}/pulse,target=/run/user/1000/pulse,type=bind",
+    // Host PipeWire socket, for the native PipeWire audio backend.
+    "source=${localEnv:XDG_RUNTIME_DIR}/pipewire-0,target=/run/user/1000/pipewire-0,type=bind",
     // Host D-Bus session bus, for the tray (StatusNotifierItem) and XDG portals (global shortcuts).
     "source=${localEnv:XDG_RUNTIME_DIR}/bus,target=/run/user/1000/bus,type=bind",
     // Persist Claude Code login/config and the cargo cache across rebuilds.

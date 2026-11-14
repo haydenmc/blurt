@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 mesa-vulkan-drivers vulkan-tools fonts-dejavu-core \
         # audio: ALSA dev headers (cpal), routed to host PipeWire/Pulse
         libasound2-dev libasound2-plugins pulseaudio-utils \
+        # audio: native PipeWire (cpal's pipewire host; bindgen needs libclang)
+        libpipewire-0.3-dev libspa-0.2-dev libclang-dev pipewire-bin \
         # Mumble: protobuf (prost-build) and Opus codec
         protobuf-compiler libopus-dev \
     && rm -rf /var/lib/apt/lists/*
