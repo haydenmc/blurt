@@ -1,10 +1,11 @@
 //! Runs the pipeline against real devices.
 //!
 //! Device callbacks only move samples through lock-free ring buffers (no
-//! locks, no allocation). One DSP thread does everything else on a short
-//! tick: it mixes enough playback to keep the output ring at its target
-//! level (which follows the device's clock), then processes whatever mic
-//! audio has arrived. Controls reach it through atomics and a command queue.
+//! locks, no allocation). One DSP thread does everything else, woken by the
+//! callbacks, by incoming voice and by controls: it mixes enough playback to
+//! keep the output ring at its target level (which follows the device's
+//! clock), then processes whatever mic audio has arrived. Controls reach it
+//! through atomics and a command queue.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -22,9 +23,12 @@ use crate::mixer::{Mixer, SpeakerSettings};
 use crate::resample::Resampler;
 use crate::{Closed, FRAME_SAMPLES, SAMPLE_RATE, VoiceSink, VoiceSource};
 
-/// How often the DSP thread wakes. Bounds how long mic audio and network
-/// packets wait before being handled.
-const TICK: Duration = Duration::from_millis(2);
+/// The DSP thread sleeps until there is work: the mic callback delivered
+/// audio, the speaker callback made room, or a voice packet or control
+/// arrived (see [`Waker`]). This timeout is only a backstop, for a missed
+/// wakeup or a stalled device, and short enough that even then playback
+/// (always at least 10 ms queued) doesn't run dry.
+const FALLBACK_WAKE: Duration = Duration::from_millis(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -156,11 +160,11 @@ pub struct EngineStats {
     pub input_overruns: u64,
     /// Output callbacks that ran short because the DSP thread fell behind.
     pub output_underruns: u64,
-    /// Capture to processing: device buffering plus waiting for the tick.
+    /// Capture to processing: the device's buffering.
     pub input_latency: Duration,
     /// Mixing to sound: queued playback plus device buffering.
     pub output_latency: Duration,
-    /// The longest DSP tick in the last second.
+    /// The longest DSP pass in the last second.
     pub max_tick: Duration,
 }
 
@@ -187,6 +191,19 @@ enum Command {
     Speaker(u32, SpeakerSettings),
     RemoveSpeaker(u32),
     Bitrate(i32),
+}
+
+/// Wakes the engine's DSP thread. Cheap, never blocks, and safe to call
+/// from any thread, including async tasks.
+#[derive(Debug, Clone)]
+pub struct Waker(Option<thread::Thread>);
+
+impl Waker {
+    pub fn wake(&self) {
+        if let Some(thread) = &self.0 {
+            thread.unpark();
+        }
+    }
 }
 
 /// The running audio engine. Dropping it stops audio.
@@ -251,39 +268,58 @@ impl Engine {
 
     pub fn set_push_to_talk(&self, pressed: bool) {
         self.shared.push_to_talk.store(pressed, Ordering::Relaxed);
+        self.wake();
     }
 
-    /// Muted, nothing is sent. Takes effect within one tick.
+    /// Muted, nothing is sent. Takes effect from the next 10 ms frame.
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
+        self.wake();
     }
 
     /// Deafened, nothing is played (and incoming voice isn't decoded).
     pub fn set_deafened(&self, deafened: bool) {
         self.shared.deafened.store(deafened, Ordering::Relaxed);
+        self.wake();
     }
 
     pub fn set_mode(&self, mode: TransmitMode) {
-        let _ = self.commands.send(Command::Mode(mode));
+        self.send(Command::Mode(mode));
     }
 
     pub fn set_processing(&self, processing: Processing) {
-        let _ = self.commands.send(Command::Processing(processing));
+        self.send(Command::Processing(processing));
     }
 
     /// Sets a speaker's volume or local mute.
     pub fn set_speaker(&self, session: u32, settings: SpeakerSettings) {
-        let _ = self.commands.send(Command::Speaker(session, settings));
+        self.send(Command::Speaker(session, settings));
     }
 
     /// Forgets a speaker who left the server.
     pub fn remove_speaker(&self, session: u32) {
-        let _ = self.commands.send(Command::RemoveSpeaker(session));
+        self.send(Command::RemoveSpeaker(session));
     }
 
     /// E.g. to stay under the server's bandwidth limit.
     pub fn set_bitrate(&self, bitrate: i32) {
-        let _ = self.commands.send(Command::Bitrate(bitrate));
+        self.send(Command::Bitrate(bitrate));
+    }
+
+    /// For the network side to call after handing the [`VoiceSource`] a
+    /// packet, so it's handled at once instead of at the next device
+    /// callback.
+    pub fn waker(&self) -> Waker {
+        Waker(self.thread.as_ref().map(|t| t.thread().clone()))
+    }
+
+    fn wake(&self) {
+        self.waker().wake();
+    }
+
+    fn send(&self, command: Command) {
+        let _ = self.commands.send(command);
+        self.wake();
     }
 
     pub fn stats(&self) -> EngineStats {
@@ -296,7 +332,7 @@ impl Engine {
             speakers: s.speakers.load(Ordering::Relaxed) as usize,
             input_overruns: s.input_overruns.load(Ordering::Relaxed),
             output_underruns: s.output_underruns.load(Ordering::Relaxed),
-            input_latency: us(&s.input_device_us) + TICK / 2,
+            input_latency: us(&s.input_device_us),
             output_latency: us(&s.output_latency_us),
             max_tick: us(&s.max_tick_us),
         }
@@ -306,6 +342,7 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.wake();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -347,18 +384,24 @@ impl Devices {
         // Half a second of room either way: far more than ever queues up.
         let (mic_tx, mic) = rtrb::RingBuffer::new(input_config.sample_rate as usize / 2);
         let (speaker, speaker_rx) = rtrb::RingBuffer::new(output_config.sample_rate as usize / 2);
+        // Opened on the DSP thread, so the callbacks wake it directly.
+        let dsp = thread::current();
 
         let input_stream = match input_format {
-            cpal::SampleFormat::F32 => build_input::<f32>(&input, &input_config, mic_tx, shared),
-            cpal::SampleFormat::I16 => build_input::<i16>(&input, &input_config, mic_tx, shared),
+            cpal::SampleFormat::F32 => {
+                build_input::<f32>(&input, &input_config, mic_tx, shared, dsp.clone())
+            }
+            cpal::SampleFormat::I16 => {
+                build_input::<i16>(&input, &input_config, mic_tx, shared, dsp.clone())
+            }
             other => return Err(AudioError::UnsupportedFormat(other)),
         }?;
         let output_stream = match output_format {
             cpal::SampleFormat::F32 => {
-                build_output::<f32>(&output, &output_config, speaker_rx, shared)
+                build_output::<f32>(&output, &output_config, speaker_rx, shared, dsp.clone())
             }
             cpal::SampleFormat::I16 => {
-                build_output::<i16>(&output, &output_config, speaker_rx, shared)
+                build_output::<i16>(&output, &output_config, speaker_rx, shared, dsp.clone())
             }
             other => return Err(AudioError::UnsupportedFormat(other)),
         }?;
@@ -447,6 +490,7 @@ fn build_input<T>(
     config: &cpal::StreamConfig,
     mut mic: rtrb::Producer<f32>,
     shared: &Arc<Shared>,
+    dsp: thread::Thread,
 ) -> Result<cpal::Stream, AudioError>
 where
     T: SizedSample,
@@ -475,6 +519,7 @@ where
             if lost > 0 {
                 shared.input_overruns.fetch_add(lost, Ordering::Relaxed);
             }
+            dsp.unpark();
         },
         move |e| {
             log::error!("Mic stream error: {e}");
@@ -489,6 +534,7 @@ fn build_output<T>(
     config: &cpal::StreamConfig,
     mut speaker: rtrb::Consumer<f32>,
     shared: &Arc<Shared>,
+    dsp: thread::Thread,
 ) -> Result<cpal::Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -520,6 +566,7 @@ where
             if short {
                 shared.output_underruns.fetch_add(1, Ordering::Relaxed);
             }
+            dsp.unpark();
         },
         move |e| {
             log::error!("Speaker stream error: {e}");
@@ -671,7 +718,7 @@ impl Dsp {
                 let input = Duration::from_micros(shared.input_device_us.load(Ordering::Relaxed));
                 let output =
                     Duration::from_micros(shared.output_latency_us.load(Ordering::Relaxed));
-                let echo_delay = input + output + TICK / 2;
+                let echo_delay = input + output;
                 self.capture
                     .set_echo_delay_ms(echo_delay.as_millis() as i32);
                 shared
@@ -684,7 +731,9 @@ impl Dsp {
                 log::info!("Voice source closed; stopping audio");
                 break;
             }
-            thread::sleep(TICK.saturating_sub(tick_start.elapsed()));
+            // Work that arrived while this pass ran (its wakeup is pending)
+            // makes this return at once.
+            thread::park_timeout(FALLBACK_WAKE);
         }
     }
 }

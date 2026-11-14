@@ -16,7 +16,8 @@ pub mod mixer;
 pub mod resample;
 
 pub use engine::{
-    AudioError, DeviceInfo, Engine, EngineConfig, EngineStats, hosts, input_devices, output_devices,
+    AudioError, DeviceInfo, Engine, EngineConfig, EngineStats, Waker, hosts, input_devices,
+    output_devices,
 };
 
 /// Everything inside the engine runs at 48 kHz mono, Opus's native rate.
