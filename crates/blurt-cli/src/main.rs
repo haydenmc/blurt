@@ -20,7 +20,7 @@ use mumble_protocol::client::{
 
 const USAGE: &str = "\
 Usage:
-  blurt-cli devices
+  blurt-cli devices [--audio-host NAME]
   blurt-cli [OPTIONS] HOST            talk and listen
   blurt-cli measure [OPTIONS] HOST    measure latency through the server (no devices used)
 
@@ -36,6 +36,8 @@ Options:
   --no-aec --no-ns --no-agc
                        turn off echo cancellation, noise suppression, gain
   --loopback           send our voice back to ourselves through the server
+  --audio-host NAME    PipeWire, PulseAudio, ALSA... (default: the preferred one;
+                       see `blurt-cli devices`)
   --input ID --output ID
                        devices to use (see `blurt-cli devices`)
   --stats              print engine stats every second
@@ -111,6 +113,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("no-agc") => args.engine.processing.auto_gain = false,
             Long("input") => args.engine.input_device = Some(parser.value()?.string()?),
             Long("output") => args.engine.output_device = Some(parser.value()?.string()?),
+            Long("audio-host") => args.engine.host = Some(parser.value()?.string()?),
             Long("help") | Short('h') => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -144,7 +147,7 @@ async fn main() -> ExitCode {
         }
     };
     let result = match args.command {
-        Command::Devices => list_devices(),
+        Command::Devices => list_devices(args.engine.host.as_deref()),
         Command::Talk => talk(args).await,
         Command::Measure => measure(args).await,
     };
@@ -159,10 +162,11 @@ async fn main() -> ExitCode {
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
-fn list_devices() -> Result<()> {
+fn list_devices(host: Option<&str>) -> Result<()> {
+    println!("Audio hosts: {}", blurt_audio::hosts().join(", "));
     for (kind, devices) in [
-        ("Inputs", blurt_audio::input_devices()?),
-        ("Outputs", blurt_audio::output_devices()?),
+        ("Inputs", blurt_audio::input_devices(host)?),
+        ("Outputs", blurt_audio::output_devices(host)?),
     ] {
         println!("{kind}:");
         for device in devices {

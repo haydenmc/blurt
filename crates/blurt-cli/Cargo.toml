@@ -14,3 +14,9 @@ lexopt = "0.3"
 log = "0.4"
 mumble-protocol = { path = "../mumble-protocol" }
 tokio = { version = "1.53", features = ["macros", "rt", "signal", "sync", "time"] }
+
+[features]
+# The native PipeWire audio host (needs libpipewire-0.3 and libclang to build).
+# cpal prefers it when a PipeWire server is running, then PulseAudio.
+default = ["pipewire"]
+pipewire = ["blurt-audio/pipewire"]

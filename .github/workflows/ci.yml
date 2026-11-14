@@ -19,7 +19,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config cmake libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libx11-xcb-dev libfontconfig-dev libasound2-dev libopus-dev
+            libx11-xcb-dev libfontconfig-dev libasound2-dev libopus-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libclang-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
