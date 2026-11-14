@@ -7,6 +7,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/citelao/mumbo"
 
 [dependencies]
+aes = "0.8.4"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 futures-util = { version = "0.3.34", features = ["sink"] }
