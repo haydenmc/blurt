@@ -522,8 +522,12 @@ where
             dsp.unpark();
         },
         move |e| {
-            log::error!("Mic stream error: {e}");
-            errors.stop.store(true, Ordering::Relaxed);
+            // Closing the streams on shutdown reports them disconnected.
+            if errors.stop.swap(true, Ordering::Relaxed) {
+                log::debug!("Mic stream error while stopping: {e}");
+            } else {
+                log::error!("Mic stream error: {e}");
+            }
         },
         None,
     )?)
@@ -569,8 +573,12 @@ where
             dsp.unpark();
         },
         move |e| {
-            log::error!("Speaker stream error: {e}");
-            errors.stop.store(true, Ordering::Relaxed);
+            // Closing the streams on shutdown reports them disconnected.
+            if errors.stop.swap(true, Ordering::Relaxed) {
+                log::debug!("Speaker stream error while stopping: {e}");
+            } else {
+                log::error!("Speaker stream error: {e}");
+            }
         },
         None,
     )?)
@@ -660,11 +668,15 @@ impl Dsp {
 
             // Playback: keep the output ring at its target level. The device
             // drains it at its own pace, so this follows the device's clock.
-            let mut speakers = 0;
+            // Only passes that mixed update the count; mic-only passes keep it.
+            let mut speakers = None;
             while self.speaker_capacity - devices.speaker.slots() < self.playback_target {
                 let mut frame = [0.0; FRAME_SAMPLES];
                 if !deafened {
-                    speakers = speakers.max(self.mixer.mix(&mut frame));
+                    let mixed = self.mixer.mix(&mut frame);
+                    speakers = Some(speakers.unwrap_or(0).max(mixed));
+                } else {
+                    speakers = Some(0);
                 }
                 // Everything played is the echo canceller's reference.
                 // Deafened, nothing plays, so there is no echo to cancel.
@@ -708,13 +720,28 @@ impl Dsp {
                     .store(report.transmitting, Ordering::Relaxed);
             }
             mic_48k.drain(..consumed);
-            shared.speakers.store(speakers as u32, Ordering::Relaxed);
+            if let Some(speakers) = speakers {
+                shared.speakers.store(speakers as u32, Ordering::Relaxed);
+            }
 
             // Once a second: tidy up and refresh the echo canceller's delay.
             max_tick = max_tick.max(tick_start.elapsed());
             if last_housekeeping.elapsed() >= Duration::from_secs(1) {
                 last_housekeeping = Instant::now();
                 self.mixer.prune(tick_start);
+                if log::log_enabled!(log::Level::Debug) {
+                    for (session, stats, delay) in self.mixer.speaker_stats() {
+                        log::debug!(
+                            "Speaker {session}: played {}, recovered {}, concealed {}, \
+                             late {}, overflowed {}; delay {delay} frames",
+                            stats.played,
+                            stats.recovered,
+                            stats.concealed,
+                            stats.late,
+                            stats.overflowed,
+                        );
+                    }
+                }
                 let input = Duration::from_micros(shared.input_device_us.load(Ordering::Relaxed));
                 let output =
                     Duration::from_micros(shared.output_latency_us.load(Ordering::Relaxed));
