@@ -24,6 +24,9 @@ cargo test --workspace
 
 Run a local server to test against: see [`dev/mumble-server`](dev/mumble-server/README.md).
 
+Changes to `crates/mumble-protocol` go back upstream to Mumbo; see
+[docs/upstream.md](docs/upstream.md) for the commit rules and the export script.
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
