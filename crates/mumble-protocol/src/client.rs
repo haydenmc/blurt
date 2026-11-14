@@ -358,7 +358,11 @@ async fn run(
                 {
                     log::error!("Dropping voice packet: {e}");
                 }
-                apply_and_publish(&state, &events_tx, message)?;
+                // One bad update (e.g. a UserState for an unknown channel) must not
+                // end the call; the handshake above is where errors are fatal.
+                if let Err(e) = apply_and_publish(&state, &events_tx, message) {
+                    log::warn!("Ignoring server message that could not be applied: {e}");
+                }
             }
             message = server_rx.recv() => {
                 if let Some(message) = message {
@@ -391,7 +395,8 @@ async fn run(
                                 session: m.session.clone(),
                                 content: m.message.clone(),
                             }));
-                            events_tx.send(crate::state::MumbleEvent::ChatMessage).unwrap();
+                            // Only fails if nobody is listening.
+                            let _ = events_tx.send(crate::state::MumbleEvent::ChatMessage);
                         }
                         _ => {
                             // No-op
@@ -470,7 +475,7 @@ impl MumbleClient {
                 .lock()
                 .unwrap()
                 .current_user()
-                .unwrap()
+                .ok_or(MumbleConnectionError::Disconnected)?
                 .channel_id
         };
         log::info!(
@@ -927,6 +932,39 @@ mod tests {
 
         server.send(user(3, "Bob")).await;
 
+        wait_until(|| user_names(&connection.client).contains(&"Bob".to_string())).await;
+    }
+
+    #[tokio::test]
+    async fn bad_or_unknown_messages_do_not_end_the_connection() {
+        let (connection, mut server) = connected().await;
+
+        // A message type this crate does not decode...
+        server
+            .send(raw::UserStats {
+                session: Some(1),
+                ..Default::default()
+            })
+            .await;
+        // ...a payload that is not valid protobuf...
+        server
+            .frames
+            .send(MumbleFrame {
+                type_id: raw::UserState::TYPE_ID,
+                payload: vec![0xff, 0xff, 0xff].into(),
+            })
+            .await
+            .unwrap();
+        // ...and a valid message the state cannot apply.
+        server
+            .send(raw::UserState {
+                session: Some(1),
+                channel_id: Some(999),
+                ..Default::default()
+            })
+            .await;
+
+        server.send(user(3, "Bob")).await;
         wait_until(|| user_names(&connection.client).contains(&"Bob".to_string())).await;
     }
 

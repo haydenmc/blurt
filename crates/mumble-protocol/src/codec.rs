@@ -70,7 +70,16 @@ impl tokio_util::codec::Decoder for MumbleCodec {
         let Some(frame) = self.inner.decode(src)? else {
             return Ok(None);
         };
-        let message = crate::ServerToClientMessage::decode(frame.type_id, &frame.payload)?;
+        // The framing is intact even when a payload is malformed, so skip the
+        // message instead of ending the connection over it.
+        let message = crate::ServerToClientMessage::decode(frame.type_id, &frame.payload)
+            .unwrap_or_else(|e| {
+                log::warn!("Failed to decode message type {}: {e}", frame.type_id);
+                crate::ServerToClientMessage::Unknown {
+                    type_id: frame.type_id,
+                    payload: frame.payload.to_vec(),
+                }
+            });
         Ok(Some(message))
     }
 }
@@ -185,7 +194,7 @@ mod tests {
     mod codec_tests {
         use tokio_util::codec::Encoder;
 
-        use crate::raw;
+        use crate::{TcpMessageId, raw};
 
         use super::*;
 
@@ -196,6 +205,46 @@ mod tests {
             let frame = codec.decode(&mut buf).unwrap();
             assert!(frame.is_none());
             assert!(buf.is_empty());
+        }
+
+        #[test]
+        fn unknown_and_malformed_messages_do_not_stop_decoding() {
+            let mut codec = MumbleCodec::default();
+            let mut buf = BytesMut::new();
+            let mut frames = MumbleFrameCodec;
+            for (type_id, payload) in [
+                (99, vec![1, 2]),                                  // Unknown type.
+                (raw::UserState::TYPE_ID, vec![0xff, 0xff, 0xff]), // Malformed.
+            ] {
+                frames
+                    .encode(
+                        MumbleFrame {
+                            type_id,
+                            payload: payload.into(),
+                        },
+                        &mut buf,
+                    )
+                    .unwrap();
+            }
+            codec
+                .encode(
+                    crate::ClientToServerMessage::Ping(Default::default()),
+                    &mut buf,
+                )
+                .unwrap();
+
+            assert!(matches!(
+                codec.decode(&mut buf).unwrap(),
+                Some(crate::ServerToClientMessage::Unknown { type_id: 99, .. })
+            ));
+            assert!(matches!(
+                codec.decode(&mut buf).unwrap(),
+                Some(crate::ServerToClientMessage::Unknown { type_id: 9, .. })
+            ));
+            assert!(matches!(
+                codec.decode(&mut buf).unwrap(),
+                Some(crate::ServerToClientMessage::Ping(_))
+            ));
         }
 
         #[test]

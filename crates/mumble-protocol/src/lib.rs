@@ -138,6 +138,12 @@ pub enum ServerToClientMessage {
     PermissionQuery(raw::PermissionQuery),
     CodecVersion(raw::CodecVersion),
     ServerConfig(raw::ServerConfig),
+    /// A message this crate does not handle, or one that failed to decode.
+    /// Surfaced rather than treated as an error, so the connection survives it.
+    Unknown {
+        type_id: u16,
+        payload: Vec<u8>,
+    },
 }
 
 impl ServerToClientMessage {
@@ -155,12 +161,10 @@ impl ServerToClientMessage {
                     raw_udp::Ping::TYPE_ID => ServerToClientMessage::UdpTunnel(
                         ServerToClientUdpMessage::Ping(raw_udp::Ping::decode(rest)?),
                     ),
-                    _ => {
-                        return Err(Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Unknown UDP message type: {}", udp_type),
-                        ));
-                    }
+                    _ => ServerToClientMessage::Unknown {
+                        type_id: msg_type,
+                        payload: payload.to_vec(),
+                    },
                 }
             }
             raw::Ping::TYPE_ID => ServerToClientMessage::Ping(raw::Ping::decode(payload)?),
@@ -198,16 +202,10 @@ impl ServerToClientMessage {
             raw::ServerConfig::TYPE_ID => {
                 ServerToClientMessage::ServerConfig(raw::ServerConfig::decode(payload)?)
             }
-            _ => {
-                return Err(Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Unknown message type: {} (size: {})",
-                        msg_type,
-                        payload.len()
-                    ),
-                ));
-            }
+            _ => ServerToClientMessage::Unknown {
+                type_id: msg_type,
+                payload: payload.to_vec(),
+            },
         };
         Ok(message)
     }
@@ -320,6 +318,10 @@ mod tests {
             ServerToClientMessage::PermissionQuery(Default::default()),
             ServerToClientMessage::CodecVersion(Default::default()),
             ServerToClientMessage::ServerConfig(Default::default()),
+            ServerToClientMessage::Unknown {
+                type_id: 99,
+                payload: vec![1, 2],
+            },
         ];
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/server_to_client_messages.json"))
@@ -354,6 +356,7 @@ mod tests {
         "PermissionQuery",
         "CodecVersion",
         "ServerConfig",
+        "Unknown",
     ];
 
     // No `_ =>` arm on purpose: adding a variant fails to compile here, as a
@@ -378,6 +381,7 @@ mod tests {
             ServerToClientMessage::PermissionQuery(_) => "PermissionQuery",
             ServerToClientMessage::CodecVersion(_) => "CodecVersion",
             ServerToClientMessage::ServerConfig(_) => "ServerConfig",
+            ServerToClientMessage::Unknown { .. } => "Unknown",
         }
     }
 

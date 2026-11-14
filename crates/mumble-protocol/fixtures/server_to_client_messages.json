@@ -202,5 +202,15 @@
       "max_users": null,
       "recording_allowed": null
     }
+  },
+  {
+    "type": "Unknown",
+    "data": {
+      "type_id": 99,
+      "payload": [
+        1,
+        2
+      ]
+    }
   }
 ]
