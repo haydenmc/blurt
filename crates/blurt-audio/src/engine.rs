@@ -180,6 +180,10 @@ impl Engine {
         sink: impl VoiceSink,
     ) -> Result<Self, AudioError> {
         let shared = Arc::new(Shared::default());
+        // Quiet until the first frame is measured.
+        shared
+            .mic_level_db
+            .store((-100f32).to_bits(), Ordering::Relaxed);
         let (commands, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread_shared = shared.clone();
@@ -291,6 +295,8 @@ struct Devices {
     speaker: rtrb::Producer<f32>,
     input_rate: u32,
     output_rate: u32,
+    /// How much the output device takes per callback, when known.
+    output_buffer_frames: Option<u32>,
 }
 
 impl Devices {
@@ -341,6 +347,10 @@ impl Devices {
             speaker,
             input_rate: input_config.sample_rate,
             output_rate: output_config.sample_rate,
+            output_buffer_frames: match output_config.buffer_size {
+                cpal::BufferSize::Fixed(frames) => Some(frames),
+                cpal::BufferSize::Default => None,
+            },
         })
     }
 }
@@ -494,6 +504,16 @@ where
     )?)
 }
 
+/// Output ring level to keep, in device samples: the configured buffer, but
+/// always enough for a whole device request plus 5 ms, or the device
+/// would drain the ring between refills and underrun.
+fn playback_target(config: &EngineConfig, devices: &Devices) -> usize {
+    let rate = devices.output_rate as usize;
+    let configured = (rate as f64 * config.playback_buffer.as_secs_f64()) as usize;
+    let request = devices.output_buffer_frames.unwrap_or(0) as usize;
+    configured.max(request + rate / 200)
+}
+
 /// The DSP thread's state.
 struct Dsp {
     capture: Capture,
@@ -512,8 +532,7 @@ impl Dsp {
             mixer: Mixer::new(config.jitter),
             mic_resampler: Resampler::new(devices.input_rate, SAMPLE_RATE)?,
             speaker_resampler: Resampler::new(SAMPLE_RATE, devices.output_rate)?,
-            playback_target: (devices.output_rate as f64 * config.playback_buffer.as_secs_f64())
-                as usize,
+            playback_target: playback_target(config, devices),
             speaker_capacity: devices.speaker.buffer().capacity(),
         })
     }
@@ -576,7 +595,10 @@ impl Dsp {
                     speakers = speakers.max(self.mixer.mix(&mut frame));
                 }
                 // Everything played is the echo canceller's reference.
-                self.capture.render(&frame);
+                // Deafened, nothing plays, so there is no echo to cancel.
+                if !deafened {
+                    self.capture.render(&frame);
+                }
                 speaker_out.clear();
                 self.speaker_resampler.process(&frame, &mut speaker_out);
                 if push_all(&mut devices.speaker, &speaker_out) < speaker_out.len() {

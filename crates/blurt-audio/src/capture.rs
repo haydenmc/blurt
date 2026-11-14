@@ -225,6 +225,9 @@ impl Capture {
         muted: bool,
         sink: &mut impl VoiceSink,
     ) -> FrameReport {
+        if muted {
+            return self.capture_muted(mic, sink);
+        }
         let mut frame = [0.0; FRAME_SAMPLES];
         if let Err(e) = self.apm.process_capture_f32(&[mic], &mut [&mut frame]) {
             log::debug!("Echo canceller capture failed: {e}");
@@ -248,15 +251,7 @@ impl Capture {
             TransmitMode::PushToTalk => (talk, PTT_HOLD_FRAMES),
             TransmitMode::Continuous => (true, 1),
         };
-        let decision = if muted && self.gate.is_open() {
-            // End the spurt properly rather than just going silent.
-            self.gate = Gate::default();
-            Transmit::End
-        } else if muted {
-            Transmit::Skip
-        } else {
-            self.gate.update(wanted, hold)
-        };
+        let decision = self.gate.update(wanted, hold);
 
         let frame_number = self.frame_counter;
         self.frame_counter += 1;
@@ -283,6 +278,30 @@ impl Capture {
             level_db: level_db(&frame),
             speech,
             transmitting: decision != Transmit::Skip,
+        }
+    }
+
+    /// Muted, nothing is sent, so none of the processing is needed (which
+    /// is most of the engine's CPU use). A spurt in progress still ends
+    /// properly, with a terminator, rather than just going silent.
+    fn capture_muted(
+        &mut self,
+        mic: &[f32; FRAME_SAMPLES],
+        sink: &mut impl VoiceSink,
+    ) -> FrameReport {
+        let frame_number = self.frame_counter;
+        self.frame_counter += 1;
+        self.preroll_len = 0;
+        let ending = self.gate.is_open();
+        if ending {
+            self.gate = Gate::default();
+            // Silence, not the unprocessed mic: muting should cut off at once.
+            self.queue(&[0.0; FRAME_SAMPLES], frame_number, true, sink);
+        }
+        FrameReport {
+            level_db: level_db(mic),
+            speech: 0.0,
+            transmitting: ending,
         }
     }
 

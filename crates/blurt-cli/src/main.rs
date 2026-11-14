@@ -32,12 +32,15 @@ Options:
   --trust              trust the server's certificate, whatever it is
   --mode MODE          vad (default) or continuous
   --frames N           10 ms frames per packet: 1 (default) or 2
+  --device-buffer N    device buffer in frames at the device rate (default 240)
   --no-aec --no-ns --no-agc
                        turn off echo cancellation, noise suppression, gain
   --loopback           send our voice back to ourselves through the server
   --input ID --output ID
                        devices to use (see `blurt-cli devices`)
-  --stats              print engine stats every second";
+  --stats              print engine stats every second
+  --muted --deafened   start muted (nothing sent) or deafened (nothing played)
+  --duration SECS      quit after this long";
 
 struct Args {
     command: Command,
@@ -49,6 +52,9 @@ struct Args {
     trust: bool,
     loopback: bool,
     stats: bool,
+    muted: bool,
+    deafened: bool,
+    duration: Option<Duration>,
     engine: EngineConfig,
 }
 
@@ -71,6 +77,9 @@ fn parse_args() -> Result<Args, lexopt::Error> {
         trust: false,
         loopback: false,
         stats: false,
+        muted: false,
+        deafened: false,
+        duration: None,
         engine: EngineConfig::default(),
     };
     let mut parser = lexopt::Parser::from_env();
@@ -83,6 +92,11 @@ fn parse_args() -> Result<Args, lexopt::Error> {
             Long("trust") => args.trust = true,
             Long("loopback") => args.loopback = true,
             Long("stats") => args.stats = true,
+            Long("muted") => args.muted = true,
+            Long("deafened") => args.deafened = true,
+            Long("duration") => {
+                args.duration = Some(Duration::from_secs_f64(parser.value()?.parse()?))
+            }
             Long("mode") => {
                 args.engine.mode = match parser.value()?.string()?.as_str() {
                     "vad" => TransmitMode::default(),
@@ -91,6 +105,7 @@ fn parse_args() -> Result<Args, lexopt::Error> {
                 }
             }
             Long("frames") => args.engine.encoder.frames_per_packet = parser.value()?.parse()?,
+            Long("device-buffer") => args.engine.device_buffer_frames = parser.value()?.parse()?,
             Long("no-aec") => args.engine.processing.echo_cancellation = false,
             Long("no-ns") => args.engine.processing.noise_suppression = false,
             Long("no-agc") => args.engine.processing.auto_gain = false,
@@ -263,13 +278,25 @@ async fn talk(args: Args) -> Result<()> {
         NetworkVoice(connection.audio),
         network_sink(client.clone(), args.loopback),
     )?;
+    engine.set_muted(args.muted);
+    engine.set_deafened(args.deafened);
+    if args.muted {
+        client.set_self_mute(true)?;
+    }
+    if args.deafened {
+        client.set_self_deaf(true)?;
+    }
     log::info!("Audio running; Ctrl-C to quit");
+    let started = Instant::now();
 
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = ticker.tick() => {
+                if args.duration.is_some_and(|d| started.elapsed() >= d) {
+                    break;
+                }
                 if engine.is_finished() {
                     log::info!("Audio stopped");
                     break;
