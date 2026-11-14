@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::codec::Decoder;
 use crate::jitter::{FrameDecoder, JitterBuffer, JitterConfig, JitterStats};
+use crate::level::{self, Envelope};
 use crate::{FRAME_SAMPLES, IncomingVoice};
 
 /// Speakers silent for this long are dropped, freeing their decoder.
@@ -13,6 +14,8 @@ const FORGET_AFTER: Duration = Duration::from_secs(30);
 struct Speaker<D> {
     jitter: JitterBuffer<D>,
     last_heard: Instant,
+    /// How loud they are, before their volume setting.
+    level: Envelope,
 }
 
 /// Per-speaker volume and local mute, set by the user.
@@ -37,6 +40,8 @@ pub struct Mixer<D = Decoder> {
     new_decoder: fn() -> Option<D>,
     jitter: JitterConfig,
     frame: [f32; FRAME_SAMPLES],
+    /// Master output volume, applied to the whole mix.
+    volume: f32,
 }
 
 impl Mixer<Decoder> {
@@ -53,6 +58,7 @@ impl<D: FrameDecoder> Mixer<D> {
             new_decoder,
             jitter,
             frame: [0.0; FRAME_SAMPLES],
+            volume: 1.0,
         }
     }
 
@@ -70,6 +76,7 @@ impl<D: FrameDecoder> Mixer<D> {
                 entry.insert(Speaker {
                     jitter: JitterBuffer::new(decoder, self.jitter),
                     last_heard: now,
+                    level: Envelope::default(),
                 })
             }
         };
@@ -85,10 +92,12 @@ impl<D: FrameDecoder> Mixer<D> {
         let mut active = 0;
         for (session, speaker) in &mut self.speakers {
             if !speaker.jitter.pull(&mut self.frame) {
+                speaker.level.step(0.0);
                 continue;
             }
             active += 1;
-            let gain = self.settings.get(session).map_or(1.0, |s| s.gain);
+            speaker.level.step(level::rms(&self.frame));
+            let gain = self.volume * self.settings.get(session).map_or(1.0, |s| s.gain);
             for (o, s) in out.iter_mut().zip(&self.frame) {
                 *o += s * gain;
             }
@@ -106,6 +115,19 @@ impl<D: FrameDecoder> Mixer<D> {
             self.speakers.remove(&session);
         }
         self.settings.insert(session, settings);
+    }
+
+    /// Scales everything played; 1.0 leaves it as it is.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.max(0.0);
+    }
+
+    /// Each speaker's smoothed level (see [`crate::level`]), before their
+    /// volume setting, updated with every mixed frame.
+    pub fn levels(&self) -> impl Iterator<Item = (u32, f32)> + '_ {
+        self.speakers
+            .iter()
+            .map(|(&session, s)| (session, s.level.value()))
     }
 
     /// Forgets a speaker who left.
@@ -189,6 +211,51 @@ mod tests {
         // FakeDecoder outputs the value itself, so the sum is soft-clipped.
         assert_eq!(mixer.mix(&mut out), 2);
         assert_eq!(out[0], soft_clip(1.0 + 0.5));
+    }
+
+    #[test]
+    fn volume_scales_the_mix() {
+        let mut mixer = mixer();
+        mixer.push(voice(1, 0, 1), Instant::now());
+        mixer.set_volume(0.5);
+        let mut out = [0.0; FRAME_SAMPLES];
+        mixer.mix(&mut out);
+        // FakeDecoder plays the packet's value: 1.0, halved.
+        assert_eq!(out[0], 0.5);
+    }
+
+    #[test]
+    fn levels_rise_with_speech_and_fall_after_it() {
+        let mut mixer = mixer();
+        let now = Instant::now();
+        for frame in 0..5 {
+            mixer.push(
+                IncomingVoice {
+                    is_terminator: frame == 4,
+                    ..voice(1, frame, 1)
+                },
+                now,
+            );
+        }
+        let level = |mixer: &Mixer<FakeDecoder>| mixer.levels().find(|&(s, _)| s == 1).unwrap().1;
+        let mut out = [0.0; FRAME_SAMPLES];
+        let mut peak: f32 = 0.0;
+        for _ in 0..6 {
+            mixer.mix(&mut out);
+            peak = peak.max(level(&mixer));
+        }
+        assert!(peak > 0.5, "{peak}");
+        // After the talk spurt it fades rather than dropping to 0 at once...
+        for _ in 0..5 {
+            mixer.mix(&mut out);
+        }
+        let fading = level(&mixer);
+        assert!(fading > 0.0 && fading < peak, "{fading}");
+        // ...and settles to silence.
+        for _ in 0..500 {
+            mixer.mix(&mut out);
+        }
+        assert_eq!(level(&mixer), 0.0);
     }
 
     #[test]

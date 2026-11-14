@@ -7,9 +7,9 @@
 //! clock), then processes whatever mic audio has arrived. Controls reach it
 //! through atomics and a command queue.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use cpal::{FromSample, SizedSample};
 use crate::capture::{Capture, Processing, TransmitMode};
 use crate::codec::EncoderConfig;
 use crate::jitter::JitterConfig;
+use crate::level::{self, Envelope};
 use crate::mixer::{Mixer, SpeakerSettings};
 use crate::recorder::{Recorder, Track};
 use crate::resample::Resampler;
@@ -159,6 +160,8 @@ impl Default for EngineConfig {
 pub struct EngineStats {
     /// The cleaned-up mic level, in dBFS.
     pub mic_level_db: f32,
+    /// The cleaned-up mic level, smoothed for meters (see [`crate::level`]).
+    pub mic_level: f32,
     /// The voice detector's speech probability, 0 to 1.
     pub speech: f32,
     pub transmitting: bool,
@@ -183,6 +186,7 @@ struct Shared {
     muted: AtomicBool,
     deafened: AtomicBool,
     mic_level_db: AtomicU32,
+    mic_level: AtomicU32,
     speech: AtomicU32,
     transmitting: AtomicBool,
     speakers: AtomicU32,
@@ -191,6 +195,9 @@ struct Shared {
     input_device_us: AtomicU64,
     output_latency_us: AtomicU64,
     max_tick_us: AtomicU64,
+    /// Smoothed level per speaker, refreshed whenever audio is mixed. The
+    /// DSP thread only ever `try_lock`s it, so a reader can't stall audio.
+    speaker_levels: Mutex<Vec<(u32, f32)>>,
 }
 
 enum Command {
@@ -198,6 +205,7 @@ enum Command {
     Processing(Processing),
     Speaker(u32, SpeakerSettings),
     RemoveSpeaker(u32),
+    Volume(f32),
     Bitrate(i32),
 }
 
@@ -304,6 +312,21 @@ impl Engine {
         self.send(Command::Speaker(session, settings));
     }
 
+    /// Master output volume: 1.0 plays everyone as they are.
+    pub fn set_output_volume(&self, volume: f32) {
+        self.send(Command::Volume(volume));
+    }
+
+    /// Each speaker's smoothed level, by session, for meters and visuals.
+    /// Speakers not heard from in a while are left out.
+    pub fn speaker_levels(&self) -> Vec<(u32, f32)> {
+        self.shared
+            .speaker_levels
+            .lock()
+            .map(|levels| levels.clone())
+            .unwrap_or_default()
+    }
+
     /// Forgets a speaker who left the server.
     pub fn remove_speaker(&self, session: u32) {
         self.send(Command::RemoveSpeaker(session));
@@ -335,6 +358,7 @@ impl Engine {
         let us = |a: &AtomicU64| Duration::from_micros(a.load(Ordering::Relaxed));
         EngineStats {
             mic_level_db: f32::from_bits(s.mic_level_db.load(Ordering::Relaxed)),
+            mic_level: f32::from_bits(s.mic_level.load(Ordering::Relaxed)),
             speech: f32::from_bits(s.speech.load(Ordering::Relaxed)),
             transmitting: s.transmitting.load(Ordering::Relaxed),
             speakers: s.speakers.load(Ordering::Relaxed) as usize,
@@ -645,6 +669,7 @@ impl Dsp {
         let mut was_deafened = false;
         let mut last_housekeeping = Instant::now();
         let mut max_tick = Duration::ZERO;
+        let mut mic_level = Envelope::default();
 
         while !shared.stop.load(Ordering::Relaxed) {
             let tick_start = Instant::now();
@@ -657,6 +682,7 @@ impl Dsp {
                         self.mixer.set_speaker(session, settings)
                     }
                     Command::RemoveSpeaker(session) => self.mixer.remove(session),
+                    Command::Volume(volume) => self.mixer.set_volume(volume),
                     Command::Bitrate(bitrate) => self.capture.set_bitrate(bitrate),
                 }
             }
@@ -738,6 +764,9 @@ impl Dsp {
                     recorder.push(Track::Sent, sent);
                 }
                 consumed += FRAME_SAMPLES;
+                // Processed audio is silence while muted, so the meter rests.
+                let level = mic_level.step(level::rms(self.capture.processed()));
+                shared.mic_level.store(level.to_bits(), Ordering::Relaxed);
                 shared
                     .mic_level_db
                     .store(report.level_db.to_bits(), Ordering::Relaxed);
@@ -751,6 +780,10 @@ impl Dsp {
             mic_48k.drain(..consumed);
             if let Some(speakers) = speakers {
                 shared.speakers.store(speakers as u32, Ordering::Relaxed);
+                if let Ok(mut levels) = shared.speaker_levels.try_lock() {
+                    levels.clear();
+                    levels.extend(self.mixer.levels());
+                }
             }
 
             // Once a second: tidy up and refresh the echo canceller's delay.
