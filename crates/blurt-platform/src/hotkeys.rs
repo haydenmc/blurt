@@ -116,6 +116,7 @@ pub fn listen(app_id: &str) -> impl Stream<Item = Event> + use<> {
     stream::select(out, stream::once(driver).filter_map(|()| async { None }))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn shortcut(id: &str) -> Option<&'static Shortcut> {
     SHORTCUTS.iter().find(|s| s.id == id)
 }

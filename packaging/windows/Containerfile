@@ -1,0 +1,33 @@
+# The Windows cross-build: what scripts/windows-package.sh needs to build
+# blurt.exe and its installer on Linux. Run it with scripts/windows-build.sh.
+#
+# Microsoft's CRT and Windows SDK aren't in the image (their licence
+# doesn't allow passing them on). cargo-xwin downloads them on the first
+# build, into XWIN_CACHE_DIR, which windows-build.sh keeps outside it.
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+        # cargo-xwin: clang-cl, lld-link, llvm-lib, llvm-rc
+        clang lld llvm \
+        # C built from source: libopus (cmake), aws-lc (cmake, nasm)
+        cmake ninja-build nasm \
+        # mumble-protocol's build script (prost-build)
+        protobuf-compiler \
+        # packaging: icon, zip, installer
+        librsvg2-bin icoutils zip nsis \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG CARGO_XWIN_VERSION=0.23.1
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable \
+            --component clippy --target x86_64-pc-windows-msvc \
+    && cargo install --locked cargo-xwin --version "${CARGO_XWIN_VERSION}" \
+    && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+    && chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}"

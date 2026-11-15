@@ -8,6 +8,9 @@ jobs:
   flatpak:
     uses: ./.github/workflows/flatpak.yml
 
+  windows:
+    uses: ./.github/workflows/windows.yml
+
   tarball:
     runs-on: ubuntu-24.04
     steps:
@@ -42,7 +45,7 @@ jobs:
           path: blurt-x86_64-linux.tar.gz
 
   release:
-    needs: [flatpak, tarball]
+    needs: [flatpak, windows, tarball]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -59,7 +62,10 @@ jobs:
           **Install:** download `blurt.flatpak`, then `flatpak install --user blurt.flatpak`.
 
           The tarball is a plain binary built on Ubuntu 24.04; it needs libopus and libpipewire-0.3 installed.
+
+          **Windows:** run `blurt-x86_64-windows-setup.exe` (installs for you only, no admin needed), or unzip `blurt-x86_64-windows.zip` anywhere. They aren't signed yet, so SmartScreen will warn: choose *More info*, then *Run anyway*. No tray icon or global shortcuts on Windows yet.
           EOF
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "blurt $GITHUB_REF_NAME" --notes-file notes.md --generate-notes \
-            assets/blurt.flatpak assets/blurt-x86_64-linux.tar.gz
+            assets/blurt.flatpak assets/blurt-x86_64-linux.tar.gz \
+            assets/blurt-x86_64-windows.zip assets/blurt-x86_64-windows-setup.exe

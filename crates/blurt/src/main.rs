@@ -1,4 +1,6 @@
 //! blurt: a small, fast, native Mumble client.
+// On Windows, a GUI program: no console window opens alongside it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod config;
 mod html;
@@ -35,7 +37,15 @@ use ui::voice::{self, progress};
 use ui::{Layout, Page, Pivot, chrome};
 
 fn main() -> iced::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mut log =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    // A Windows GUI program has no console: the log goes to a file instead.
+    #[cfg(windows)]
+    if let Some(file) = log_file() {
+        log.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    log.format_timestamp_millis().init();
+    log::info!("blurt {} starting", env!("CARGO_PKG_VERSION"));
     // The renderer is picked when iced starts, from the setting as saved.
     let rich = config::dir()
         .and_then(|dir| config::load(&dir).ok())
@@ -54,16 +64,47 @@ fn main() -> iced::Result {
         .run()
 }
 
-/// Opens blurt's window: at startup, and again from the tray.
-fn open_window() -> Task<Message> {
-    let (_id, open) = window::open(window::Settings {
+/// `%LOCALAPPDATA%\blurt\data\blurt.log`, fresh each run.
+#[cfg(windows)]
+fn log_file() -> Option<std::fs::File> {
+    let dirs = directories::ProjectDirs::from("", "", "blurt")?;
+    let dir = dirs.data_local_dir();
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::File::create(dir.join("blurt.log")).ok()
+}
+
+/// Opens blurt's window: at startup, and again from the tray. Its id
+/// counts as the window straight away, before it has opened, so nothing
+/// that arrives meanwhile (on Windows, the tray failing) opens a second.
+fn open_window() -> (window::Id, Task<Message>) {
+    let (id, open) = window::open(window::Settings {
         size: WINDOW,
         min_size: Some(Size::new(360.0, 480.0)),
         // blurt draws its own title bar.
         decorations: false,
+        #[cfg(windows)]
+        icon: window_icon(),
         ..window::Settings::default()
     });
-    open.map(Message::WindowOpened)
+    (id, open.map(Message::WindowOpened))
+}
+
+/// Windows shows a window's own icon in the taskbar and Alt+Tab. The
+/// tray's drawing of the app icon (blue, as when connected) serves, at
+/// its largest size.
+#[cfg(windows)]
+fn window_icon() -> Option<window::Icon> {
+    let image = tray_icon::Look::Connected
+        .images(theme::Accent::default())
+        .last()?;
+    let rgba = image
+        .argb
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[a, r, g, b]| [r, g, b, a])
+        .collect();
+    window::icon::from_rgba(rgba, image.width, image.height).ok()
 }
 
 /// The size the window opens at: wide, with room for the tree and chat.
@@ -208,7 +249,7 @@ pub enum Message {
 
 impl Blurt {
     fn new() -> (Self, Task<Message>) {
-        let open = open_window();
+        let (window, open) = open_window();
         let dir = config::dir();
         let (config, error) = match dir.as_deref().map(config::load) {
             Some(Ok(config)) => (config, None),
@@ -219,7 +260,7 @@ impl Blurt {
             None => (Config::default(), None),
         };
         let app = Self {
-            window: None,
+            window: Some(window),
             dir,
             config,
             screen: Screen::Idle,
@@ -278,6 +319,13 @@ impl Blurt {
         task
     }
 
+    /// Opens the window again, after it was closed to the tray.
+    fn open_window(&mut self) -> Task<Message> {
+        let (id, open) = open_window();
+        self.window = Some(id);
+        open
+    }
+
     /// Does what the user (or something else) asked for: a global shortcut
     /// or a tray menu item.
     fn act(&mut self, action: Action) -> Task<Message> {
@@ -286,7 +334,7 @@ impl Blurt {
             Action::ToggleDeafen => self.step(Message::ToggleDeafen),
             Action::ShowWindow => match self.window {
                 Some(id) => window::close(id),
-                None => open_window(),
+                None => self.open_window(),
             },
             Action::Quit => self.quit(),
             Action::PushToTalk => Task::none(),
@@ -359,6 +407,7 @@ impl Blurt {
         let on_window = |task: fn(window::Id) -> Task<Message>| window.map_or(Task::none(), task);
         match message {
             Message::WindowOpened(id) => {
+                log::info!("Window open");
                 self.window = Some(id);
                 // Opened again from the tray: at the size it opens at.
                 self.width = WINDOW.width;
@@ -639,7 +688,7 @@ impl Blurt {
                     self.tray = Tray::default();
                     // Hidden in a tray that's gone: show the window again.
                     if self.window.is_none() {
-                        return open_window();
+                        return self.open_window();
                     }
                 }
             },
