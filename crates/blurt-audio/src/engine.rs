@@ -543,6 +543,22 @@ fn stream_config(
     Ok((config, format))
 }
 
+/// A stream error is only reported: the stream carries on after a glitch
+/// or a move to a new default device, and stopping is the engine's call.
+/// (WASAPI reports a glitch as many devices start, so it's not an error.)
+fn stream_error(stream: &str, e: &cpal::Error, shared: &Shared) {
+    // Closing the streams on shutdown reports them disconnected.
+    if shared.stop.load(Ordering::Relaxed) {
+        log::debug!("{stream} stream error while stopping: {e}");
+        return;
+    }
+    match e.kind() {
+        cpal::ErrorKind::Xrun => log::debug!("{stream} stream glitch: {e}"),
+        cpal::ErrorKind::DeviceChanged => log::info!("{stream} stream: {e}"),
+        _ => log::error!("{stream} stream error: {e}"),
+    }
+}
+
 fn build_input<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -579,14 +595,7 @@ where
             }
             dsp.unpark();
         },
-        move |e| {
-            // Closing the streams on shutdown reports them disconnected.
-            if errors.stop.swap(true, Ordering::Relaxed) {
-                log::debug!("Mic stream error while stopping: {e}");
-            } else {
-                log::error!("Mic stream error: {e}");
-            }
-        },
+        move |e| stream_error("Mic", &e, &errors),
         None,
     )?)
 }
@@ -630,14 +639,7 @@ where
             }
             dsp.unpark();
         },
-        move |e| {
-            // Closing the streams on shutdown reports them disconnected.
-            if errors.stop.swap(true, Ordering::Relaxed) {
-                log::debug!("Speaker stream error while stopping: {e}");
-            } else {
-                log::error!("Speaker stream error: {e}");
-            }
-        },
+        move |e| stream_error("Speaker", &e, &errors),
         None,
     )?)
 }
