@@ -99,8 +99,10 @@ fn window_icon() -> Option<window::Icon> {
         .last()?;
     let rgba = image
         .argb
-        .chunks_exact(4)
-        .flat_map(|p| [p[1], p[2], p[3], p[0]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[a, r, g, b]| [r, g, b, a])
         .collect();
     window::icon::from_rgba(rgba, image.width, image.height).ok()
 }
