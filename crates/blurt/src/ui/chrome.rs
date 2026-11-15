@@ -9,13 +9,13 @@ use crate::Message;
 use crate::icons::{self, Glyph};
 use crate::theme::{self, Tokens};
 
-pub const TITLE_BAR: f32 = 36.0;
 /// How far in from the window's edge resizing can start.
 const EDGE: f32 = 6.0;
 
-/// An empty bar that drags the window, with minimize, maximize and close at
-/// the right. `before` sits at its left, e.g. the compact layout's label.
-pub fn title_bar<'a>(t: Tokens, before: Option<Element<'a, Message>>) -> Element<'a, Message> {
+/// A bar that drags the window, with minimize, maximize and close at the
+/// right. `content` (e.g. the page pivots) fills the rest; its buttons
+/// still take clicks, and anywhere else in the bar drags.
+pub fn title_bar<'a>(t: Tokens, content: Element<'a, Message>) -> Element<'a, Message> {
     let glyph = |glyph: Glyph, message: Message, label: &'static str| {
         tooltip(
             button(icons::icon(glyph, 12.0, 1.4, t.fg2))
@@ -28,23 +28,21 @@ pub fn title_bar<'a>(t: Tokens, before: Option<Element<'a, Message>>) -> Element
             tooltip::Position::Bottom,
         )
     };
-    let mut inside = row![]
-        .height(TITLE_BAR)
-        .align_y(iced::Center)
-        .padding([0, 16]);
-    if let Some(before) = before {
-        inside = inside.push(before);
-    }
-    let drag = mouse_area(inside.push(space::horizontal()))
-        .on_press(Message::Drag)
-        .on_double_click(Message::ToggleMaximize);
+    let drag = mouse_area(
+        iced::widget::container(content)
+            .width(Fill)
+            .align_y(iced::Center)
+            .padding([6, 0]),
+    )
+    .on_press(Message::Drag)
+    .on_double_click(Message::ToggleMaximize);
     row![
         drag,
         glyph(Glyph::Minimize, Message::Minimize, "minimize"),
         glyph(Glyph::Maximize, Message::ToggleMaximize, "maximize"),
         glyph(Glyph::Close, Message::CloseWindow, "close"),
     ]
-    .height(TITLE_BAR)
+    .height(iced::Shrink)
     .align_y(iced::Center)
     .padding(iced::Padding::ZERO.right(4))
     .into()

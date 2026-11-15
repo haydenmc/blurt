@@ -566,10 +566,8 @@ impl Blurt {
                 reduce_motion: self.reduce_motion(),
                 volume: self.config.audio.output_volume,
             }),
-            (_, Page::Settings) => self.page_with_nav(t, pages::settings(t, &self.config)),
-            (Screen::Connecting { server, .. }, _) => {
-                self.page_with_nav(t, pages::connecting(t, server))
-            }
+            (_, Page::Settings) => pages::settings(t, &self.config),
+            (Screen::Connecting { server, .. }, _) => pages::connecting(t, server),
             (
                 Screen::Trust {
                     server,
@@ -577,17 +575,23 @@ impl Blurt {
                     reason,
                 },
                 _,
-            ) => self.page_with_nav(t, pages::trust(t, server, fingerprint, reason)),
-            (_, _) => self.page_with_nav(
-                t,
-                match &self.editor {
-                    Some(editor) => pages::editor(t, editor),
-                    None => pages::servers(t, &self.config, connected.map(|c| &c.room.server)),
-                },
-            ),
+            ) => pages::trust(t, server, fingerprint, reason),
+            (_, _) => match &self.editor {
+                Some(editor) => pages::editor(t, editor),
+                None => pages::servers(t, &self.config, connected.map(|c| &c.room.server)),
+            },
         };
 
-        let mut page = column![chrome::title_bar(t, None)];
+        // The title bar carries the page pivots (or, on the compact voice
+        // screen, the server's name), so there's no separate nav row.
+        let server = connected.map(|c| c.room.server.label.as_str());
+        let header = match server {
+            Some(server) if self.page == Page::Voice && self.layout == Layout::Compact => {
+                voice::compact_header(t, server)
+            }
+            _ => voice::nav_row(t, self.page, connected.is_some(), server),
+        };
+        let mut page = column![chrome::title_bar(t, header)];
         if let Some(error) = &self.error {
             page = page.push(pages::error_banner(t, error));
         }
@@ -596,28 +600,6 @@ impl Blurt {
             .height(Fill)
             .style(theme::fill(t.bg));
         chrome::with_resize_edges(page.into())
-    }
-
-    fn page_with_nav<'a>(
-        &'a self,
-        t: Tokens,
-        content: Element<'a, Message>,
-    ) -> Element<'a, Message> {
-        let server = match &self.screen {
-            Screen::Connected(c) => Some(c.room.server.label.as_str()),
-            _ => None,
-        };
-        column![
-            voice::nav_row(
-                t,
-                self.page,
-                matches!(self.screen, Screen::Connected(_)),
-                server
-            ),
-            content,
-        ]
-        .height(Fill)
-        .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {

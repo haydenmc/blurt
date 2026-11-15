@@ -115,7 +115,6 @@ fn wide<'a>(v: &Voice<'a>) -> Element<'a, Message> {
     .height(Fill);
     let server = v.room.server.label.as_str();
     column![
-        nav_row(t, Page::Voice, true, Some(server)),
         stack![decoration(t, server), body].height(Fill),
         control_bar(v),
     ]
@@ -190,12 +189,6 @@ fn compact<'a>(v: &Voice<'a>) -> Element<'a, Message> {
 
     column![
         column![
-            row![
-                label(&v.room.server.label, t.fg2),
-                space::horizontal(),
-                page_links(t),
-            ]
-            .align_y(Center),
             container(hero).clip(true).width(Fill),
             talking_line(v, size::BODY),
             container(
@@ -234,7 +227,17 @@ fn page_links<'a>(t: Tokens) -> Element<'a, Message> {
     .into()
 }
 
-/// `voice  servers  settings`, and the server's name at the right.
+/// The compact voice screen's header, for the title bar: the server's name,
+/// and the way to the other pages.
+pub fn compact_header<'a>(t: Tokens, server: &str) -> Element<'a, Message> {
+    row![label(server, t.fg2), space::horizontal(), page_links(t)]
+        .align_y(Center)
+        .padding(Padding::ZERO.left(20.0).right(8.0))
+        .into()
+}
+
+/// `voice  servers  settings`, and the server's name at the right; shown in
+/// the title bar.
 pub fn nav_row<'a>(
     t: Tokens,
     page: Page,
@@ -265,9 +268,10 @@ pub fn nav_row<'a>(
             .style(theme::nav_word(t, p == page)),
         );
     }
+    // The title bar adds the right-hand padding before its glyphs.
     let mut row = row![nav, space::horizontal()]
         .align_y(Center)
-        .padding([0, 32]);
+        .padding(Padding::ZERO.left(32.0).right(16.0));
     if let Some(server) = server {
         row = row.push(label(server, t.fg2));
     }

@@ -117,14 +117,27 @@ fn room(now: Instant) -> Room {
     room
 }
 
-fn window<'a>(t: Tokens, body: Element<'a, Message>) -> Element<'a, Message> {
+/// The window as the app draws it: `header` in the title bar over `body`.
+fn window<'a>(
+    t: Tokens,
+    header: Element<'a, Message>,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
     chrome::with_resize_edges(
-        container(column![chrome::title_bar(t, None), body])
+        container(column![chrome::title_bar(t, header), body])
             .width(Fill)
             .height(Fill)
             .style(theme::fill(t.bg))
             .into(),
     )
+}
+
+/// The voice screen's title bar contents, as `main` picks them.
+fn header<'a>(t: Tokens, layout: Layout) -> Element<'a, Message> {
+    match layout {
+        Layout::Wide => voice::nav_row(t, Page::Voice, true, Some("Nightjar")),
+        Layout::Compact => voice::compact_header(t, "Nightjar"),
+    }
 }
 
 fn save(dir: &std::path::Path, name: &str, t: Tokens, size: Size, view: Element<'_, Message>) {
@@ -193,7 +206,7 @@ fn snapshots() {
                 &format!("voice-{name}-{tag}"),
                 t,
                 size,
-                window(t, voice::view(&v)),
+                window(t, header(t, layout), voice::view(&v)),
             );
         }
         if tag == "dark" {
@@ -214,7 +227,7 @@ fn snapshots() {
                     &format!("voice-compact-{}", pivot.name()),
                     t,
                     size,
-                    window(t, voice::view(&v)),
+                    window(t, header(t, Layout::Compact), voice::view(&v)),
                 );
             }
             room.pivot = Pivot::People;
@@ -227,11 +240,8 @@ fn snapshots() {
                 size,
                 window(
                     t,
-                    column![
-                        nav(Page::Servers),
-                        pages::servers(t, &config, Some(&config.servers[0]))
-                    ]
-                    .into(),
+                    nav(Page::Servers),
+                    pages::servers(t, &config, Some(&config.servers[0])),
                 ),
             );
             save(
@@ -239,10 +249,7 @@ fn snapshots() {
                 "settings",
                 t,
                 size,
-                window(
-                    t,
-                    column![nav(Page::Settings), pages::settings(t, &config)].into(),
-                ),
+                window(t, nav(Page::Settings), pages::settings(t, &config)),
             );
         }
     }
