@@ -31,6 +31,9 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Build the cross-build image
         uses: docker/build-push-action@v6
+        env:
+          # No build record artifact: nothing uses it.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: packaging/windows
           file: packaging/windows/Containerfile
