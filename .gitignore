@@ -3,3 +3,4 @@
 build-dir/
 *.flatpak
 packaging/flatpak/cargo-sources.json
+dist/

@@ -18,6 +18,11 @@ flatpak run io.github.haydenmc.blurt
 The release also has a plain binary tarball (built on Ubuntu 24.04; it needs
 libopus and libpipewire-0.3).
 
+On Windows, run `blurt-x86_64-windows-setup.exe` from the release (it installs
+for you only, no admin needed), or unzip `blurt-x86_64-windows.zip` anywhere.
+Neither is signed yet, so SmartScreen warns: choose *More info*, then *Run
+anyway*. Windows doesn't have the tray icon or global shortcuts yet.
+
 ## Status
 
 | Milestone | |
@@ -59,6 +64,18 @@ scripts/flatpak-sources.sh   # crate list for the offline build; needs python3-a
 flatpak-builder --user --install-deps-from=flathub --force-clean \
   build-dir packaging/flatpak/io.github.haydenmc.blurt.yml
 ```
+
+Windows builds are cross-compiled on Linux, in a container (podman or docker),
+by [`.github/workflows/windows.yml`](.github/workflows/windows.yml) and locally with:
+
+```bash
+scripts/windows-build.sh   # dist/blurt-x86_64-windows.zip and -setup.exe
+```
+
+The first build downloads Microsoft's CRT and Windows SDK (cargo-xwin;
+by using it you accept [their licence](https://go.microsoft.com/fwlink/?LinkId=2086102)).
+There's no MSIX package until releases are properly code-signed: with a
+self-signed certificate, testers would have to trust it as admin first.
 
 Changes to `crates/mumble-protocol` go back upstream to Mumbo; see
 [docs/upstream.md](docs/upstream.md) for the commit rules and the export script.

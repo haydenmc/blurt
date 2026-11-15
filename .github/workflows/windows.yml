@@ -1,0 +1,54 @@
+name: Windows
+
+# Cross-builds on Linux, in the container scripts/windows-build.sh uses
+# locally: lints the Windows build, then packages the zip and installer.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    env:
+      BLURT_WINDOWS_IMAGE: blurt-windows-build
+      BLURT_WINDOWS_CACHE: ${{ github.workspace }}/../windows-cache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the cross-build image
+        uses: docker/build-push-action@v6
+        with:
+          context: packaging/windows
+          file: packaging/windows/Containerfile
+          tags: blurt-windows-build
+          load: true
+          cache-from: type=gha,scope=windows-build
+          cache-to: type=gha,scope=windows-build,mode=max
+      - name: Cache crates, Microsoft's CRT and SDK, and the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/../windows-cache
+            target/windows
+          key: windows-${{ hashFiles('Cargo.lock', 'packaging/windows/Containerfile') }}
+          restore-keys: windows-
+      - name: Clippy (Windows)
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          scripts/windows-build.sh env CARGO_TARGET_DIR=target/windows \
+            cargo xwin clippy --locked -p blurt --target x86_64-pc-windows-msvc \
+            --no-default-features --features gpu
+      - run: scripts/windows-build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            dist/blurt-x86_64-windows.zip
+            dist/blurt-x86_64-windows-setup.exe
