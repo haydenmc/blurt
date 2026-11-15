@@ -64,6 +64,9 @@ pub enum Event {
     /// No global hotkeys: the desktop has no shortcuts portal, or it
     /// refused. The stream ends after this.
     Unavailable(String),
+    /// The shortcuts are released, as asked by [`Controller::stop`]. The
+    /// stream ends after this.
+    Stopped,
 }
 
 /// Requests to the running [`listen`].
@@ -73,6 +76,7 @@ pub struct Controller(mpsc::UnboundedSender<Command>);
 #[derive(Debug)]
 enum Command {
     Configure,
+    Stop,
 }
 
 impl Controller {
@@ -80,6 +84,12 @@ impl Controller {
     /// them (see [`Event::Bound`]).
     pub fn configure(&self) {
         let _ = self.0.unbounded_send(Command::Configure);
+    }
+
+    /// Releases the shortcuts and ends the stream (with [`Event::Stopped`]).
+    /// Better than dropping the stream, which can't tell the desktop.
+    pub fn stop(&self) {
+        let _ = self.0.unbounded_send(Command::Stop);
     }
 }
 
@@ -92,9 +102,14 @@ pub fn listen(app_id: &str) -> impl Stream<Item = Event> + use<> {
     let _ = events.unbounded_send(Event::Ready(Controller(commands)));
     let app_id = app_id.to_owned();
     let driver = async move {
-        if let Err(e) = imp::run(&app_id, &events, inbox).await {
-            log::warn!("No global hotkeys: {e}");
-            let _ = events.unbounded_send(Event::Unavailable(e));
+        match imp::run(&app_id, &events, inbox).await {
+            Ok(()) => {
+                let _ = events.unbounded_send(Event::Stopped);
+            }
+            Err(e) => {
+                log::warn!("No global hotkeys: {e}");
+                let _ = events.unbounded_send(Event::Unavailable(e));
+            }
         }
     };
     // The driver produces nothing itself; it runs while `out` is read.
@@ -210,6 +225,7 @@ mod imp {
                     }
                     None
                 }
+                Input::Command(Command::Stop) => break,
             };
             if let Some(event) = event
                 && events.unbounded_send(event).is_err()
@@ -218,7 +234,10 @@ mod imp {
                 break;
             }
         }
-        let _ = session.close().await;
+        if let Err(e) = session.close().await {
+            log::debug!("Could not close the shortcuts session: {e}");
+        }
+        log::info!("Global hotkeys released");
         Ok(())
     }
 }

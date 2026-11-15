@@ -284,6 +284,21 @@ fn snapshots() {
                     pages::settings(t, &config, false, &hotkeys),
                 ),
             );
+            let shortcuts_on = Config {
+                shortcuts: crate::config::Shortcuts { global: true },
+                ..config.clone()
+            };
+            save(
+                &dir,
+                "settings-shortcuts",
+                t,
+                size,
+                window(
+                    t,
+                    nav(Page::Settings),
+                    pages::settings(t, &shortcuts_on, false, &hotkeys),
+                ),
+            );
         }
     }
 }

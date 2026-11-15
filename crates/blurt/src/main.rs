@@ -74,6 +74,9 @@ struct Blurt {
     /// show then (and if the GPU started).
     rich: bool,
     hotkeys: Hotkeys,
+    /// Counts the times global shortcuts were turned on, so each time
+    /// starts a fresh listener.
+    hotkeys_run: u32,
 }
 
 /// The app's ID, as its desktop file is named: what the desktop knows it by
@@ -162,6 +165,7 @@ pub enum Message {
     SetReduceMotion(bool),
     SetRichVisuals(rich::RichVisuals),
     Hotkey(hotkeys::Event),
+    SetGlobalShortcuts(bool),
     ConfigureHotkeys,
 }
 
@@ -197,6 +201,7 @@ impl Blurt {
             // As `main` chose (or the user's own ICED_BACKEND).
             rich: std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia")),
             hotkeys: Hotkeys::default(),
+            hotkeys_run: 0,
         };
         (app, open.map(Message::WindowOpened))
     }
@@ -485,10 +490,25 @@ impl Blurt {
                 }
                 hotkeys::Event::Pressed(_) | hotkeys::Event::Released(_) => {}
                 hotkeys::Event::Unavailable(reason) => {
-                    self.hotkeys.controller = None;
-                    self.hotkeys.unavailable = Some(reason);
+                    self.hotkeys = Hotkeys {
+                        unavailable: Some(reason),
+                        ..Hotkeys::default()
+                    };
                 }
+                hotkeys::Event::Stopped => self.hotkeys = Hotkeys::default(),
             },
+            Message::SetGlobalShortcuts(on) => {
+                self.config.shortcuts.global = on;
+                self.save();
+                if on {
+                    // Starting over: forget why it failed last time.
+                    self.hotkeys = Hotkeys::default();
+                    self.hotkeys_run += 1;
+                } else if let Some(controller) = &self.hotkeys.controller {
+                    // The listener keeps running until it has let go.
+                    controller.stop();
+                }
+            }
             Message::ConfigureHotkeys => {
                 if let Some(controller) = &self.hotkeys.controller {
                     controller.configure();
@@ -695,10 +715,16 @@ impl Blurt {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
-            Subscription::run_with(APP_ID, |id| hotkeys::listen(id)).map(Message::Hotkey),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
         ];
+        // Global shortcuts, once asked for, until they're let go.
+        if self.config.shortcuts.global || self.hotkeys.controller.is_some() {
+            subscriptions.push(
+                Subscription::run_with((APP_ID, self.hotkeys_run), |(id, _)| hotkeys::listen(id))
+                    .map(Message::Hotkey),
+            );
+        }
         if let Screen::Connected(_) = self.screen {
             // Transmit state, your level and the talking line's times; only
             // while connected.

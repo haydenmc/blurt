@@ -401,17 +401,40 @@ pub fn settings<'a>(
                 body(t, rich_note(a.rich_visuals, rich_now)),
             ]
             .spacing(6),
-            shortcuts(t, hotkeys),
+            shortcuts(t, config.shortcuts.global, hotkeys),
             body(t, "the accent only ever lights up for live audio."),
         ]
         .spacing(28),
     )
 }
 
-/// Global hotkeys: what each is bound to, and the way to change them (in
-/// the desktop's own settings).
-fn shortcuts<'a>(t: Tokens, hotkeys: &'a Hotkeys) -> Element<'a, Message> {
-    let mut list = Column::new().spacing(4).push(label("shortcuts", t.fg2));
+/// Global shortcuts: off or on and, when on, what each is bound to and the
+/// way to change them (in the desktop's own settings).
+fn shortcuts<'a>(t: Tokens, on: bool, hotkeys: &'a Hotkeys) -> Element<'a, Message> {
+    let choice = |words: &'static str, active: bool| {
+        button(text(words).size(20).font(theme::display(if active {
+            Weight::ExtraBold
+        } else {
+            Weight::Medium
+        })))
+        .on_press(Message::SetGlobalShortcuts(words == "on"))
+        .height(44)
+        .padding([8, 0])
+        .style(theme::nav_word(t, active))
+    };
+    let mut list = Column::new()
+        .spacing(4)
+        .push(label("global shortcuts", t.fg2))
+        .push(row![choice("off", !on), choice("on", on)].spacing(24));
+    if !on {
+        return list
+            .push(body(
+                t,
+                "mute and deafen from anywhere, even while blurt isn't focused. \
+                 your desktop asks you to approve them.",
+            ))
+            .into();
+    }
     if let Some(reason) = &hotkeys.unavailable {
         return list
             .push(body(

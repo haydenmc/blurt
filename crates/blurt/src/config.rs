@@ -20,6 +20,15 @@ pub struct Config {
     pub trusted: BTreeMap<String, String>,
     pub appearance: Appearance,
     pub audio: Audio,
+    pub shortcuts: Shortcuts,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shortcuts {
+    /// Ask the desktop for shortcuts that work while blurt isn't focused.
+    /// Off until asked for: the desktop asks the user to approve them.
+    pub global: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
