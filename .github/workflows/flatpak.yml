@@ -38,6 +38,18 @@ jobs:
         run: |
           desktop-file-validate packaging/io.github.haydenmc.blurt.desktop
           appstreamcli validate --no-net packaging/io.github.haydenmc.blurt.metainfo.xml
+      # The image's runtimes sit in its read-only layers, where overlayfs
+      # can't rename directories, so updating them (when Flathub is ahead of
+      # the image) fails with "Invalid cross-device link". A copy lives in
+      # the writable layer, where it can.
+      - name: Make the image's runtimes updatable
+        run: |
+          for dir in $(flatpak --installations) "$HOME/.local/share/flatpak"; do
+            [ -d "$dir" ] || continue
+            cp -a "$dir" "$dir.copy"
+            rm -rf "$dir"
+            mv "$dir.copy" "$dir"
+          done
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: blurt.flatpak
