@@ -14,4 +14,5 @@ log = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The XDG GlobalShortcuts portal; tokio, as the app's async runtime is.
-ashpd = { version = "0.14", default-features = false, features = ["tokio", "global_shortcuts"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
