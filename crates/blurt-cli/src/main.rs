@@ -46,7 +46,8 @@ Options:
   --record DIR         record mic (raw, processed), sent and played audio as WAVs
   --muted --deafened   start muted (nothing sent) or deafened (nothing played)
   --play FILE          send this recording (48 kHz mono float WAV, as --record
-                       writes) instead of the mic, looped; uses no audio devices
+                       writes) instead of the mic, looped, pausing where it's
+                       digitally silent; uses no audio devices
   --raw                with --play: the file is raw mic audio (mic-raw.wav); process
                        and gate it as the mic would be (--mode, --no-aec...)
   --duration SECS      quit after this long";
@@ -509,12 +510,15 @@ async fn play(args: Args) -> Result<()> {
     });
     let duration = args.duration;
     let frames_per_packet = args.engine.encoder.frames_per_packet;
-    // A processed recording is already what a client would send; a raw one
+    // A processed recording is already what a client would send: it's sent
+    // as it is, except that digital silence (where the recording client
+    // sent nothing) is not sent, so talk spurts end as they did. A raw one
     // goes through the mic's processing and gate.
-    let (processing, mode) = if args.raw {
+    let raw = args.raw;
+    let (processing, mode) = if raw {
         (args.engine.processing, args.engine.mode)
     } else {
-        (Processing::NONE, TransmitMode::Continuous)
+        (Processing::NONE, TransmitMode::PushToTalk)
     };
     log::info!("Playing {}; Ctrl-C to quit", path.display());
 
@@ -537,7 +541,8 @@ async fn play(args: Args) -> Result<()> {
                 break;
             }
             std::thread::sleep((start + at).saturating_duration_since(Instant::now()));
-            capture.capture(frame, false, false, &mut sink);
+            let sound = raw || frame.iter().any(|&s| s != 0.0);
+            capture.capture(frame, sound, false, &mut sink);
         }
         Ok(())
     });
