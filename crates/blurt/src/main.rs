@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use blurt_audio::EngineConfig;
 use blurt_platform::{Action, hotkeys, tray};
 use config::{Config, Server};
-use iced::widget::{column, container};
+use iced::widget::{self, column, container};
 use iced::{Element, Fill, Size, Subscription, Task, keyboard, window};
 use mumble_protocol::client::{ConnectionOptions, Fingerprint};
 use mumble_protocol::state::MumbleState;
@@ -223,6 +223,8 @@ pub enum Message {
     ToggleDeafen,
     PushToTalk(bool),
     SpaceBar(bool),
+    /// Tab (true) or Shift+Tab (false): the next or previous text field.
+    Tab(bool),
     Volume(f32),
     SaveVolume,
     ToggleVolume,
@@ -560,6 +562,13 @@ impl Blurt {
                     c.key_talk = held && on_voice;
                     c.apply_push_to_talk();
                 }
+            }
+            Message::Tab(forward) => {
+                return if forward {
+                    widget::operation::focus_next()
+                } else {
+                    widget::operation::focus_previous()
+                };
             }
             Message::Volume(volume) => {
                 self.config.audio.output_volume = volume;
@@ -942,6 +951,15 @@ impl Blurt {
             Subscription::run_with(APP_ID, |id| tray::listen(id, tray::State::default()))
                 .map(Message::Tray),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
+            // Text fields let Tab through; it moves between them.
+            keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                } => Some(Message::Tab(!modifiers.shift())),
+                _ => None,
+            }),
         ];
         // Global shortcuts, once asked for, until they're let go.
         if self.config.shortcuts.global || self.hotkeys.controller.is_some() {
