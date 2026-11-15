@@ -35,6 +35,9 @@ fn main() -> iced::Result {
     iced::daemon(Blurt::new, Blurt::update, Blurt::view)
         .title(Blurt::title)
         .theme(Blurt::theme)
+        .font(theme::FONTS[0])
+        .font(theme::FONTS[1])
+        .default_font(theme::ui(iced::font::Weight::Normal))
         .subscription(Blurt::subscription)
         .run()
 }

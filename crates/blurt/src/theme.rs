@@ -195,8 +195,14 @@ pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
 }
 
-// Type. Inter Tight for display, Inter for the UI; without them bundled,
-// these fall back to the system's sans-serif.
+// Type. Inter Tight for display, Inter for the UI, both bundled (variable
+// fonts, so every weight comes from one file; OFL, see assets/fonts).
+
+/// The font files, to load at startup.
+pub const FONTS: [&[u8]; 2] = [
+    include_bytes!("../assets/fonts/Inter.ttf"),
+    include_bytes!("../assets/fonts/InterTight.ttf"),
+];
 
 pub const DISPLAY: &str = "Inter Tight";
 pub const UI: &str = "Inter";

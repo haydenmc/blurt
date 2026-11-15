@@ -128,7 +128,12 @@ fn window<'a>(t: Tokens, body: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 fn save(dir: &std::path::Path, name: &str, t: Tokens, size: Size, view: Element<'_, Message>) {
-    let mut simulator = iced_test::Simulator::with_size(Default::default(), size, view);
+    let settings = iced::Settings {
+        fonts: theme::FONTS.iter().map(|f| (*f).into()).collect(),
+        default_font: theme::ui(iced::font::Weight::Normal),
+        ..Default::default()
+    };
+    let mut simulator = iced_test::Simulator::with_size(settings, size, view);
     let snapshot = simulator.snapshot(&t.iced_theme()).expect("snapshot");
     let path = dir.join(name);
     // `matches_image` keeps an existing picture; start fresh each run. It
