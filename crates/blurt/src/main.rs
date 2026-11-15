@@ -12,6 +12,7 @@ mod sounds;
 mod talk;
 mod theme;
 mod transcript;
+mod tray_icon;
 mod ui;
 
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blurt_audio::EngineConfig;
-use blurt_platform::{Action, hotkeys};
+use blurt_platform::{Action, hotkeys, tray};
 use config::{Config, Server};
 use iced::widget::{column, container};
 use iced::{Element, Fill, Size, Subscription, Task, keyboard, window};
@@ -41,8 +42,8 @@ fn main() -> iced::Result {
         .map(|c| c.appearance.rich_visuals)
         .unwrap_or_default();
     rich::choose_renderer(rich.wanted());
-    // A daemon outlives its windows, which is how close-to-tray will work.
-    // Until the tray exists (milestone 5), closing the last window quits.
+    // A daemon outlives its windows: with a tray, closing the window
+    // leaves blurt running there.
     iced::daemon(Blurt::new, Blurt::update, Blurt::view)
         .title(Blurt::title)
         .theme(Blurt::theme)
@@ -51,6 +52,18 @@ fn main() -> iced::Result {
         .default_font(theme::ui(iced::font::Weight::Normal))
         .subscription(Blurt::subscription)
         .run()
+}
+
+/// Opens blurt's window: at startup, and again from the tray.
+fn open_window() -> Task<Message> {
+    let (_id, open) = window::open(window::Settings {
+        size: WINDOW,
+        min_size: Some(Size::new(360.0, 480.0)),
+        // blurt draws its own title bar.
+        decorations: false,
+        ..window::Settings::default()
+    });
+    open.map(Message::WindowOpened)
 }
 
 /// The size the window opens at: wide, with room for the tree and chat.
@@ -80,6 +93,25 @@ struct Blurt {
     /// Counts the times global shortcuts were turned on, so each time
     /// starts a fresh listener.
     hotkeys_run: u32,
+    tray: Tray,
+}
+
+/// The tray icon, if the desktop has a tray.
+#[derive(Debug, Default)]
+struct Tray {
+    controller: Option<tray::Controller>,
+    /// It's in the tray: closing the window can leave blurt running there.
+    shown: bool,
+    /// What it shows now, so it's only updated on a change.
+    showing: Option<TrayShows>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TrayShows {
+    look: tray_icon::Look,
+    accent: Accent,
+    status: String,
+    window_open: bool,
 }
 
 /// The app's ID, as its desktop file is named: what the desktop knows it by
@@ -169,19 +201,14 @@ pub enum Message {
     SetRichVisuals(rich::RichVisuals),
     SetNotificationSounds(bool),
     Hotkey(hotkeys::Event),
+    Tray(tray::Event),
     SetGlobalShortcuts(bool),
     ConfigureHotkeys,
 }
 
 impl Blurt {
     fn new() -> (Self, Task<Message>) {
-        let (_id, open) = window::open(window::Settings {
-            size: WINDOW,
-            min_size: Some(Size::new(360.0, 480.0)),
-            // blurt draws its own title bar.
-            decorations: false,
-            ..window::Settings::default()
-        });
+        let open = open_window();
         let dir = config::dir();
         let (config, error) = match dir.as_deref().map(config::load) {
             Some(Ok(config)) => (config, None),
@@ -206,8 +233,9 @@ impl Blurt {
             rich: std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia")),
             hotkeys: Hotkeys::default(),
             hotkeys_run: 0,
+            tray: Tray::default(),
         };
-        (app, open.map(Message::WindowOpened))
+        (app, open)
     }
 
     fn title(&self, _window: window::Id) -> String {
@@ -245,20 +273,106 @@ impl Blurt {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.step(message);
+        self.show_in_tray();
+        task
+    }
+
+    /// Does what the user (or something else) asked for: a global shortcut
+    /// or a tray menu item.
+    fn act(&mut self, action: Action) -> Task<Message> {
+        match action {
+            Action::ToggleMute => self.step(Message::ToggleMute),
+            Action::ToggleDeafen => self.step(Message::ToggleDeafen),
+            Action::ShowWindow => match self.window {
+                Some(id) => window::close(id),
+                None => open_window(),
+            },
+            Action::Quit => self.quit(),
+            Action::PushToTalk => Task::none(),
+        }
+    }
+
+    fn quit(&mut self) -> Task<Message> {
+        if let Screen::Connected(c) = &self.screen {
+            c.session.client.disconnect();
+        }
+        iced::exit()
+    }
+
+    /// Updates the tray icon, if what it shows has changed.
+    fn show_in_tray(&mut self) {
+        let Some(controller) = &self.tray.controller else {
+            return;
+        };
+        let (connected, transmitting, muted, deafened, status) = match &self.screen {
+            Screen::Connected(c) => {
+                let channel = c
+                    .room
+                    .state
+                    .current_user()
+                    .and_then(|me| c.room.state.channels.get(&me.channel_id))
+                    .map(|channel| channel.name.as_str());
+                let mut status = c.room.server.label.to_lowercase();
+                if let Some(channel) = channel {
+                    status = format!("{status} · {}", channel.to_lowercase());
+                }
+                if c.room.deafened {
+                    status += " · deafened";
+                } else if c.room.muted {
+                    status += " · muted";
+                }
+                (true, c.room.live(), c.room.muted, c.room.deafened, status)
+            }
+            Screen::Connecting { server, .. } => (
+                false,
+                false,
+                false,
+                false,
+                format!("connecting to {}", server.label.to_lowercase()),
+            ),
+            _ => (false, false, false, false, "not connected".to_owned()),
+        };
+        let shows = TrayShows {
+            look: tray_icon::Look::new(connected, transmitting, muted, deafened),
+            accent: self.config.appearance.accent,
+            status,
+            window_open: self.window.is_some(),
+        };
+        if self.tray.showing.as_ref() == Some(&shows) {
+            return;
+        }
+        controller.set(tray::State {
+            icon: shows.look.images(shows.accent).to_vec(),
+            status: shows.status.clone(),
+            connected,
+            muted,
+            deafened,
+            window_open: shows.window_open,
+        });
+        self.tray.showing = Some(shows);
+    }
+
+    fn step(&mut self, message: Message) -> Task<Message> {
         let now = Instant::now();
         let window = self.window;
         let on_window = |task: fn(window::Id) -> Task<Message>| window.map_or(Task::none(), task);
         match message {
-            Message::WindowOpened(id) => self.window = Some(id),
+            Message::WindowOpened(id) => {
+                self.window = Some(id);
+                // Opened again from the tray: at the size it opens at.
+                self.width = WINDOW.width;
+                self.layout = Layout::for_width(WINDOW.width);
+            }
             Message::WindowClosed(id) => {
                 if self.window == Some(id) {
                     self.window = None;
                 }
-                if let Screen::Connected(c) = &self.screen {
-                    c.session.client.disconnect();
+                // With a tray, blurt carries on there, without a window (and
+                // the memory it takes). Without one, closing quits.
+                if !self.tray.shown {
+                    return self.quit();
                 }
-                // TODO(milestone 5): stay alive in the tray instead.
-                return iced::exit();
             }
             Message::Resized(size) => {
                 self.width = size.width;
@@ -504,13 +618,8 @@ impl Blurt {
                     self.hotkeys.configurable = configurable;
                     self.hotkeys.unavailable = None;
                 }
-                hotkeys::Event::Pressed(Action::ToggleMute) => {
-                    return self.update(Message::ToggleMute);
-                }
-                hotkeys::Event::Pressed(Action::ToggleDeafen) => {
-                    return self.update(Message::ToggleDeafen);
-                }
-                hotkeys::Event::Pressed(_) | hotkeys::Event::Released(_) => {}
+                hotkeys::Event::Pressed(action) => return self.act(action),
+                hotkeys::Event::Released(_) => {}
                 hotkeys::Event::Unavailable(reason) => {
                     self.hotkeys = Hotkeys {
                         unavailable: Some(reason),
@@ -518,6 +627,21 @@ impl Blurt {
                     };
                 }
                 hotkeys::Event::Stopped => self.hotkeys = Hotkeys::default(),
+            },
+            Message::Tray(event) => match event {
+                tray::Event::Ready(controller) => {
+                    self.tray.controller = Some(controller);
+                    self.tray.showing = None;
+                }
+                tray::Event::Shown => self.tray.shown = true,
+                tray::Event::Action(action) => return self.act(action),
+                tray::Event::Unavailable(_) => {
+                    self.tray = Tray::default();
+                    // Hidden in a tray that's gone: show the window again.
+                    if self.window.is_none() {
+                        return open_window();
+                    }
+                }
             },
             Message::SetGlobalShortcuts(on) => {
                 self.config.shortcuts.global = on;
@@ -684,7 +808,8 @@ impl Blurt {
     fn animating(&self, now: Instant) -> bool {
         let running =
             |at: Option<Instant>, duration| at.is_some_and(|at| now.duration_since(at) < duration);
-        if self.reduce_motion() {
+        // Nothing to draw on with the window closed.
+        if self.reduce_motion() || self.window.is_none() {
             return false;
         }
         if running(self.reflowed, theme::motion::REFLOW) {
@@ -765,6 +890,8 @@ impl Blurt {
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             window::close_events().map(Message::WindowClosed),
+            Subscription::run_with(APP_ID, |id| tray::listen(id, tray::State::default()))
+                .map(Message::Tray),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
         ];
         // Global shortcuts, once asked for, until they're let go.

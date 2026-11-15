@@ -40,6 +40,12 @@ impl Accent {
         }
     }
 
+    /// The gradient's two ends.
+    pub fn ends(self) -> (Color, Color) {
+        let (a1, a2, _) = self.colors();
+        (a1, a2)
+    }
+
     /// The gradient's two ends, and a darker shade for accent text on light
     /// backgrounds.
     fn colors(self) -> (Color, Color, Color) {

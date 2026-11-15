@@ -19,6 +19,8 @@ iced = { version = "0.14", default-features = false, features = ["tiny-skia", "w
 log = "0.4"
 mumble-protocol = { path = "../mumble-protocol" }
 serde = { version = "1", features = ["derive"] }
+# Draws the tray icon; already built for iced's CPU renderer.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 tokio = { version = "1.53", features = ["rt", "sync"] }
 toml = "1"
 
