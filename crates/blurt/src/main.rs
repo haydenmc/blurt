@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use blurt_audio::EngineConfig;
+use blurt_platform::{Action, hotkeys};
 use config::{Config, Server};
 use iced::widget::{column, container};
 use iced::{Element, Fill, Size, Subscription, Task, keyboard, window};
@@ -72,6 +73,25 @@ struct Blurt {
     /// Whether the GPU renderer was asked for at startup; the glow can only
     /// show then (and if the GPU started).
     rich: bool,
+    hotkeys: Hotkeys,
+    /// Counts the times global shortcuts were turned on, so each time
+    /// starts a fresh listener.
+    hotkeys_run: u32,
+}
+
+/// The app's ID, as its desktop file is named: what the desktop knows it by
+/// (e.g. for its global shortcuts).
+const APP_ID: &str = "io.github.haydenmc.blurt";
+
+/// Global hotkeys, as the desktop has them.
+#[derive(Debug, Default)]
+pub struct Hotkeys {
+    controller: Option<hotkeys::Controller>,
+    pub bindings: Vec<hotkeys::Binding>,
+    /// The desktop can show settings for them.
+    pub configurable: bool,
+    /// Why there are none, if there are none.
+    pub unavailable: Option<String>,
 }
 
 enum Screen {
@@ -144,6 +164,9 @@ pub enum Message {
     SetAccent(Accent),
     SetReduceMotion(bool),
     SetRichVisuals(rich::RichVisuals),
+    Hotkey(hotkeys::Event),
+    SetGlobalShortcuts(bool),
+    ConfigureHotkeys,
 }
 
 impl Blurt {
@@ -177,6 +200,8 @@ impl Blurt {
             reflowed: None,
             // As `main` chose (or the user's own ICED_BACKEND).
             rich: std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia")),
+            hotkeys: Hotkeys::default(),
+            hotkeys_run: 0,
         };
         (app, open.map(Message::WindowOpened))
     }
@@ -447,6 +472,48 @@ impl Blurt {
                 self.config.appearance.accent = accent;
                 self.save();
             }
+            Message::Hotkey(event) => match event {
+                hotkeys::Event::Ready(controller) => self.hotkeys.controller = Some(controller),
+                hotkeys::Event::Bound {
+                    bindings,
+                    configurable,
+                } => {
+                    self.hotkeys.bindings = bindings;
+                    self.hotkeys.configurable = configurable;
+                    self.hotkeys.unavailable = None;
+                }
+                hotkeys::Event::Pressed(Action::ToggleMute) => {
+                    return self.update(Message::ToggleMute);
+                }
+                hotkeys::Event::Pressed(Action::ToggleDeafen) => {
+                    return self.update(Message::ToggleDeafen);
+                }
+                hotkeys::Event::Pressed(_) | hotkeys::Event::Released(_) => {}
+                hotkeys::Event::Unavailable(reason) => {
+                    self.hotkeys = Hotkeys {
+                        unavailable: Some(reason),
+                        ..Hotkeys::default()
+                    };
+                }
+                hotkeys::Event::Stopped => self.hotkeys = Hotkeys::default(),
+            },
+            Message::SetGlobalShortcuts(on) => {
+                self.config.shortcuts.global = on;
+                self.save();
+                if on {
+                    // Starting over: forget why it failed last time.
+                    self.hotkeys = Hotkeys::default();
+                    self.hotkeys_run += 1;
+                } else if let Some(controller) = &self.hotkeys.controller {
+                    // The listener keeps running until it has let go.
+                    controller.stop();
+                }
+            }
+            Message::ConfigureHotkeys => {
+                if let Some(controller) = &self.hotkeys.controller {
+                    controller.configure();
+                }
+            }
             Message::SetRichVisuals(rich) => {
                 self.config.appearance.rich_visuals = rich;
                 self.save();
@@ -610,7 +677,7 @@ impl Blurt {
                 volume: self.config.audio.output_volume,
                 glow: self.glow(),
             }),
-            (_, Page::Settings) => pages::settings(t, &self.config, self.rich),
+            (_, Page::Settings) => pages::settings(t, &self.config, self.rich, &self.hotkeys),
             (Screen::Connecting { server, .. }, _) => pages::connecting(t, server),
             (
                 Screen::Trust {
@@ -651,6 +718,13 @@ impl Blurt {
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
         ];
+        // Global shortcuts, once asked for, until they're let go.
+        if self.config.shortcuts.global || self.hotkeys.controller.is_some() {
+            subscriptions.push(
+                Subscription::run_with((APP_ID, self.hotkeys_run), |(id, _)| hotkeys::listen(id))
+                    .map(Message::Hotkey),
+            );
+        }
         if let Screen::Connected(_) = self.screen {
             // Transmit state, your level and the talking line's times; only
             // while connected.
