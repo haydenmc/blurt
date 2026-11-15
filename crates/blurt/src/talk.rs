@@ -27,7 +27,8 @@ pub struct TalkLog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spoke {
     pub session: u32,
-    /// Talking now (or within [`HOLD`]).
+    /// In the "talking now" group: talking, or stopped within [`HOLD`].
+    /// Whether they are actually talking is [`TalkLog::speaking`].
     pub talking: bool,
     /// How long since they stopped; `None` while talking.
     pub ago: Option<Duration>,
@@ -59,11 +60,9 @@ impl TalkLog {
         }
     }
 
-    /// Talking now, or stopped less than [`HOLD`] ago.
-    pub fn is_talking(&self, session: u32, now: Instant) -> bool {
-        self.entries
-            .get(&session)
-            .is_some_and(|e| e.talking || now.duration_since(e.since) < HOLD)
+    /// Talking at this moment; no hold.
+    pub fn speaking(&self, session: u32) -> bool {
+        self.entries.get(&session).is_some_and(|e| e.talking)
     }
 
     /// Forgets everyone; e.g. on changing channel.
@@ -138,9 +137,10 @@ mod tests {
         let mut log = TalkLog::default();
         log.observe(1, true, t0);
         log.observe(1, false, at(t0, 1000));
-        assert!(log.is_talking(1, at(t0, 2000)));
+        assert!(!log.speaking(1), "colour follows talking at once");
+        assert!(log.line(at(t0, 2000))[0].talking, "but the place is held");
         assert_eq!(log.line(at(t0, 2000))[0].ago, None);
-        assert!(!log.is_talking(1, at(t0, 2600)));
+        assert!(!log.line(at(t0, 2600))[0].talking);
         assert_eq!(
             log.line(at(t0, 9000))[0].ago,
             Some(Duration::from_millis(8000))

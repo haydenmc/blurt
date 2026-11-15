@@ -55,6 +55,7 @@ Threads: the cpal input callback, the cpal output callback, and one **DSP thread
   - Server list: favorites, saved credentials, and UDP ping, user count, and latency through `get_server_stats`.
   - Main view: a channel tree with users, talking/mute/deaf indicators, double-click to join, and a per-user volume menu. Plus a chat pane that sanitizes Mumble's HTML to plain or rich text and shows inline images up to `image_message_length`.
   - Settings: input/output device, VAD threshold with a live meter, PTT, NS/AEC/AGC toggles, frame size, hotkey bindings, theme.
+  - Backlog: a transmit-mode setting with a strict push-to-talk mode (send only while the key or the pill is held). Today the engine runs voice activity, and holding push-to-talk also transmits.
 - Config is TOML under `directories` config_dir. Passwords live in the OS keyring (`keyring`), and the client cert is stored next to the config.
 - Allocator: mimalloc. Logging: `tracing`, with a ring buffer that the UI can show.
 

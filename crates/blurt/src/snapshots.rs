@@ -176,6 +176,7 @@ fn snapshots() {
         let t = Tokens::new(mode, accent);
         for (layout, size, name) in [
             (Layout::Wide, Size::new(1100.0, 720.0), "wide"),
+            (Layout::Wide, Size::new(730.0, 600.0), "wide-narrow"),
             (Layout::Compact, Size::new(420.0, 820.0), "compact"),
         ] {
             let v = Voice {

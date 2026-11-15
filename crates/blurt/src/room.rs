@@ -27,6 +27,8 @@ pub struct Room {
     pub talk: talk::TalkLog,
     pub transcript: transcript::Transcript,
     /// Per person in your channel: easing between idle and talking colours.
+    /// Follows actual speaking, without the talking line's hold, so the
+    /// colour is immediate feedback.
     pub talking: HashMap<u32, Animation<bool>>,
     /// The channel `talk` and `talking` are about.
     channel: Option<u32>,
@@ -96,7 +98,7 @@ impl Room {
         self.talk.retain(present);
         self.talking.retain(|&s, _| present(s));
         for &(session, _) in &here {
-            let talking = self.talk.is_talking(session, now);
+            let talking = self.talk.speaking(session);
             let animation = self.talking.entry(session).or_insert_with(|| {
                 Animation::new(false)
                     .duration(theme::motion::STATE)

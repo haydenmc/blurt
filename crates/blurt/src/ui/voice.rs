@@ -116,16 +116,16 @@ fn wide<'a>(v: &Voice<'a>) -> Element<'a, Message> {
     let server = v.room.server.label.as_str();
     column![
         nav_row(t, Page::Voice, true, Some(server)),
-        stack![decoration(t, server, v.width), body].height(Fill),
+        stack![decoration(t, server), body].height(Fill),
         control_bar(v),
     ]
     .into()
 }
 
-/// The server's name, huge and almost invisible, behind the top right.
-fn decoration<'a>(t: Tokens, server: &str, width: f32) -> Element<'a, Message> {
+/// The server's name, huge and almost invisible, from the window's left
+/// edge, running off the right if it's long.
+fn decoration<'a>(t: Tokens, server: &str) -> Element<'a, Message> {
     const SIZE: f32 = 220.0;
-    let estimated = server.chars().count() as f32 * SIZE * 0.56;
     container(
         pin(text(server.to_lowercase())
             .size(SIZE)
@@ -133,7 +133,7 @@ fn decoration<'a>(t: Tokens, server: &str, width: f32) -> Element<'a, Message> {
             .line_height(LineHeight::Relative(0.92))
             .wrapping(Wrapping::None)
             .style(theme::color(alpha(t.fg, 0.03))))
-        .x(width - estimated * 0.7)
+        .x(0.0)
         .y(-SIZE * 0.18),
     )
     .width(Fill)
@@ -372,9 +372,8 @@ fn talking_line<'a>(v: &Voice<'a>, size: f32) -> Element<'a, Message> {
         let Some(user) = v.room.state.users.get(&spoke.session) else {
             continue;
         };
-        let talking = v
-            .talking(spoke.session)
-            .max(if spoke.talking { 1.0 } else { 0.0 });
+        // Colour shows talking right now; position keeps the hold.
+        let talking = v.talking(spoke.session);
         let name = text(v.display_name(user).to_owned())
             .size(size)
             .font(theme::ui(if talking > 0.5 {
@@ -557,7 +556,7 @@ fn circle_button<'a>(
 }
 
 /// The push-to-talk pill: hold to talk, lit while you're transmitting.
-fn talk_pill<'a>(v: &Voice<'a>, bars: usize, width: Length) -> Element<'a, Message> {
+fn talk_pill<'a>(v: &Voice<'a>, bars: usize, width: Length, hint: bool) -> Element<'a, Message> {
     let t = v.t;
     let c = v.room;
     let muted = c.muted || c.deafened;
@@ -570,7 +569,7 @@ fn talk_pill<'a>(v: &Voice<'a>, bars: usize, width: Length) -> Element<'a, Messa
         ("hold to talk", t.fg)
     };
     let bar_color = if live { ON_ACCENT } else { t.line };
-    let content = row![
+    let mut content = row![
         meter::meter(
             bars,
             c.mic_level,
@@ -584,10 +583,12 @@ fn talk_pill<'a>(v: &Voice<'a>, bars: usize, width: Length) -> Element<'a, Messa
             .wrapping(Wrapping::None)
             .style(theme::color(color)),
         space::horizontal(),
-        label("space", if live { ON_ACCENT } else { t.fg3 }),
     ]
     .spacing(14)
     .align_y(Center);
+    if hint {
+        content = content.push(label("space", if live { ON_ACCENT } else { t.fg3 }));
+    }
     let background = if live { t.gradient() } else { t.raise.into() };
     let pill = container(content)
         .padding([0, 22])
@@ -682,20 +683,23 @@ fn control_bar<'a>(v: &Voice<'a>) -> Element<'a, Message> {
             .on_press(Message::Disconnect)
             .padding([14, 20])
             .style(theme::pill(t));
+            let widths = BarWidths::new(v.width);
+            let mut bar = row![
+                row![mute, deafen].spacing(12),
+                talk_pill(v, 12, Length::Fixed(widths.pill), widths.labels),
+                space::horizontal(),
+                icons::standard(Glyph::Volume, 18.0, t.fg2),
+            ]
+            .spacing(16)
+            .align_y(Center)
+            .height(56);
+            if widths.labels {
+                bar = bar.push(label("output", t.fg2));
+            }
             Element::from(
-                row![
-                    row![mute, deafen].spacing(12),
-                    talk_pill(v, 12, Length::Fixed(300.0)),
-                    space::horizontal(),
-                    icons::standard(Glyph::Volume, 18.0, t.fg2),
-                    label("output", t.fg2),
-                    volume_slider(v, 140),
-                    space().width(8),
-                    container(leave).center_y(56),
-                ]
-                .spacing(16)
-                .align_y(Center)
-                .height(56),
+                bar.push(volume_slider(v, widths.slider))
+                    .push(space().width(8))
+                    .push(container(leave).center_y(56)),
             )
         }
         Layout::Compact => {
@@ -710,7 +714,7 @@ fn control_bar<'a>(v: &Voice<'a>) -> Element<'a, Message> {
                     .align_y(Center),
                 );
             }
-            bar = bar.push(talk_pill(v, 8, Length::Fill));
+            bar = bar.push(talk_pill(v, 8, Length::Fill, true));
             bar = bar.push(
                 row![
                     mute,
@@ -744,6 +748,40 @@ fn control_bar<'a>(v: &Voice<'a>) -> Element<'a, Message> {
     .into()
 }
 
+/// The wide control bar's flexible parts, for a window `width` wide. The
+/// rest of the bar is fixed, so the pill and slider give way first, and
+/// below [`BarWidths::ROOMY`] the labels go, so leave never gets squeezed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BarWidths {
+    pill: f32,
+    slider: f32,
+    /// Room for the `OUTPUT` label and the pill's `SPACE` hint.
+    labels: bool,
+}
+
+impl BarWidths {
+    const ROOMY: f32 = 960.0;
+
+    fn new(width: f32) -> Self {
+        let labels = width >= Self::ROOMY;
+        // Padding, mute and deafen, the volume icon, the leave pill and the
+        // gap before it, and the spacing between the bar's items.
+        let mut fixed = 56.0 + 124.0 + 18.0 + 110.0 + 8.0 + 6.0 * 16.0;
+        if labels {
+            fixed += 58.0 + 16.0;
+        }
+        let available = width - fixed;
+        let pill_min = if labels { 280.0 } else { 220.0 };
+        let pill = (available - 80.0).min(300.0).max(pill_min);
+        let slider = (available - pill).clamp(60.0, 140.0);
+        Self {
+            pill,
+            slider,
+            labels,
+        }
+    }
+}
+
 /// How far an animation that started `at` is, eased, from 0 to 1.
 pub fn progress(
     at: Instant,
@@ -756,4 +794,31 @@ pub fn progress(
     }
     let t = now.saturating_duration_since(at).as_secs_f32() / duration.as_secs_f32();
     theme::ease(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_fits_down_to_the_breakpoint() {
+        for width in [
+            super::super::BREAKPOINT - 8.0,
+            760.0,
+            900.0,
+            959.0,
+            960.0,
+            1400.0,
+        ] {
+            let w = BarWidths::new(width);
+            let mut used = 56.0 + 124.0 + 18.0 + 110.0 + 8.0 + 6.0 * 16.0 + w.pill + w.slider;
+            if w.labels {
+                used += 58.0 + 16.0;
+            }
+            assert!(used <= width, "{width}: {w:?} needs {used}");
+            assert!(w.pill >= 220.0 && w.slider >= 60.0, "{width}: {w:?}");
+        }
+        assert_eq!(BarWidths::new(1400.0).pill, 300.0);
+        assert_eq!(BarWidths::new(1400.0).slider, 140.0);
+    }
 }
