@@ -30,6 +30,11 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v7
+      # Release bundles (called from release.yml on a tag) get the tag's
+      # version; CI bundles stay at 0.0.0.
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: scripts/set-version.sh "$GITHUB_REF_NAME"
       - uses: actions/download-artifact@v8
         with:
           name: cargo-sources
