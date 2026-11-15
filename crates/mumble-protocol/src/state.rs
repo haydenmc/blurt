@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Error};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -154,6 +155,13 @@ pub struct MumbleState {
     pub current_user_session: Option<u32>,
 
     pub chat_messages: Vec<TextMessage>,
+
+    // When each speaking session last sent voice. A terminator isn't
+    // guaranteed (it can be lost over UDP, and some clients and bridges
+    // never send one), so speaking also ends after a quiet spell; see
+    // `expire_speaking`.
+    #[serde(skip)]
+    last_voice: HashMap<u32, Instant>,
 }
 
 impl MumbleState {
@@ -182,11 +190,38 @@ impl MumbleState {
     /// since voice packets arrive 50-100 times a second per speaker.
     pub(crate) fn set_speaking(&mut self, session: u32, is_speaking: bool) -> Option<MumbleEvent> {
         let user = self.users.get_mut(&session)?;
+        if is_speaking {
+            self.last_voice.insert(session, Instant::now());
+        } else {
+            self.last_voice.remove(&session);
+        }
         if user.is_speaking == is_speaking {
             return None;
         }
         user.is_speaking = is_speaking;
         Some(MumbleEvent::UsersChanged)
+    }
+
+    /// Stops `is_speaking` for anyone who has sent no voice for longer than
+    /// `timeout`, for when their terminator never arrives. Reports a change
+    /// only if someone stopped.
+    pub(crate) fn expire_speaking(
+        &mut self,
+        now: Instant,
+        timeout: Duration,
+    ) -> Option<MumbleEvent> {
+        let mut changed = false;
+        self.last_voice.retain(|session, last| {
+            if now.saturating_duration_since(*last) <= timeout {
+                return true;
+            }
+            if let Some(user) = self.users.get_mut(session) {
+                changed |= user.is_speaking;
+                user.is_speaking = false;
+            }
+            false
+        });
+        changed.then_some(MumbleEvent::UsersChanged)
     }
 
     pub fn apply(
@@ -297,6 +332,7 @@ impl MumbleState {
                 return Ok(Some(MumbleEvent::UsersChanged));
             }
             crate::ServerToClientMessage::UserRemove(m) => {
+                self.last_voice.remove(&m.session);
                 let removed = self.users.remove(&m.session);
                 if let Some(removed) = removed {
                     log::info!(
@@ -745,6 +781,80 @@ mod tests {
         state.apply(voice(1, false)).unwrap();
 
         assert_eq!(speaking(&state), [1]);
+    }
+
+    const TIMEOUT: Duration = Duration::from_millis(300);
+
+    #[test]
+    fn speaking_ends_after_a_quiet_spell_without_a_terminator() {
+        let mut state = MumbleState::default();
+        state.apply(user_state(1, "Alice")).unwrap();
+        state.apply(voice(1, false)).unwrap();
+
+        let event = state.expire_speaking(Instant::now() + TIMEOUT * 2, TIMEOUT);
+
+        assert_eq!(speaking(&state), Vec::<u32>::new());
+        assert!(
+            matches!(event, Some(MumbleEvent::UsersChanged)),
+            "{event:?}"
+        );
+    }
+
+    #[test]
+    fn speaking_continues_within_the_timeout() {
+        let mut state = MumbleState::default();
+        state.apply(user_state(1, "Alice")).unwrap();
+        state.apply(voice(1, false)).unwrap();
+
+        let event = state.expire_speaking(Instant::now(), TIMEOUT);
+
+        assert_eq!(speaking(&state), [1]);
+        assert!(event.is_none(), "{event:?}");
+    }
+
+    #[test]
+    fn expiring_after_a_terminator_reports_nothing() {
+        let mut state = MumbleState::default();
+        state.apply(user_state(1, "Alice")).unwrap();
+        state.apply(voice(1, false)).unwrap();
+        state.apply(voice(1, true)).unwrap();
+
+        let event = state.expire_speaking(Instant::now() + TIMEOUT * 2, TIMEOUT);
+
+        assert_eq!(speaking(&state), Vec::<u32>::new());
+        assert!(event.is_none(), "{event:?}");
+    }
+
+    #[test]
+    fn speaking_again_after_expiring() {
+        let mut state = MumbleState::default();
+        state.apply(user_state(1, "Alice")).unwrap();
+        state.apply(voice(1, false)).unwrap();
+        state.expire_speaking(Instant::now() + TIMEOUT * 2, TIMEOUT);
+
+        let event = state.apply(voice(1, false)).unwrap();
+
+        assert_eq!(speaking(&state), [1]);
+        assert!(
+            matches!(event, Some(MumbleEvent::UsersChanged)),
+            "{event:?}"
+        );
+    }
+
+    #[test]
+    fn only_quiet_speakers_expire() {
+        let mut state = MumbleState::default();
+        state.apply(user_state(1, "Alice")).unwrap();
+        state.apply(user_state(2, "Bob")).unwrap();
+        state.apply(voice(1, false)).unwrap();
+        let later = Instant::now() + TIMEOUT * 2;
+        state.apply(voice(2, false)).unwrap();
+        // Bob spoke "just before" `later`.
+        state.last_voice.insert(2, later);
+
+        state.expire_speaking(later, TIMEOUT);
+
+        assert_eq!(speaking(&state), [2]);
     }
 
     #[test]
