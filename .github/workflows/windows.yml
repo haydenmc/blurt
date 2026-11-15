@@ -23,6 +23,11 @@ jobs:
       BLURT_WINDOWS_CACHE: ${{ github.workspace }}/../windows-cache
     steps:
       - uses: actions/checkout@v7
+      # Release builds (called from release.yml on a tag) get the tag's
+      # version; CI builds stay at 0.0.0.
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: scripts/set-version.sh "$GITHUB_REF_NAME"
       - uses: docker/setup-buildx-action@v3
       - name: Build the cross-build image
         uses: docker/build-push-action@v6
