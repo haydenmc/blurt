@@ -10,6 +10,7 @@
 
 pub mod capture;
 pub mod codec;
+pub mod cue;
 pub mod engine;
 pub mod jitter;
 pub mod level;
@@ -17,6 +18,7 @@ pub mod mixer;
 mod recorder;
 pub mod resample;
 
+pub use cue::Cue;
 pub use engine::{
     AudioError, DeviceInfo, Engine, EngineConfig, EngineStats, Spectrum, Waker, hosts,
     input_devices, output_devices,

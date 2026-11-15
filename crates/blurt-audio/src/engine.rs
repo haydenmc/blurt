@@ -18,9 +18,10 @@ use cpal::{FromSample, SizedSample};
 
 use crate::capture::{Capture, Processing, TransmitMode};
 use crate::codec::EncoderConfig;
+use crate::cue::{Cue, Cues};
 use crate::jitter::JitterConfig;
 use crate::level::{self, BANDS, Bands, Envelope};
-use crate::mixer::{Mixer, SpeakerSettings};
+use crate::mixer::{Mixer, SpeakerSettings, soft_clip};
 use crate::recorder::{Recorder, Track};
 use crate::resample::Resampler;
 use crate::{Closed, FRAME_SAMPLES, SAMPLE_RATE, VoiceSink, VoiceSource};
@@ -219,6 +220,7 @@ enum Command {
     RemoveSpeaker(u32),
     Volume(f32),
     Bitrate(i32),
+    Cue(Cue, f32),
 }
 
 /// Wakes the engine's DSP thread. Cheap, never blocks, and safe to call
@@ -350,6 +352,13 @@ impl Engine {
     }
 
     /// E.g. to stay under the server's bandwidth limit.
+    /// Plays `cue` once, at `gain` times the output volume, over whatever
+    /// else is playing. Cues play while deafened too, and when the voice
+    /// source closes, the engine finishes the cues playing before it stops.
+    pub fn play_cue(&self, cue: &Cue, gain: f32) {
+        self.send(Command::Cue(cue.clone(), gain));
+    }
+
     pub fn set_bitrate(&self, bitrate: i32) {
         self.send(Command::Bitrate(bitrate));
     }
@@ -658,6 +667,7 @@ struct Dsp {
     spectrum: Spectrum,
     playback_bands: Bands,
     mic_bands: Bands,
+    cues: Cues,
 }
 
 impl Dsp {
@@ -678,7 +688,25 @@ impl Dsp {
             spectrum: Spectrum::default(),
             playback_bands: Bands::new(),
             mic_bands: Bands::new(),
+            cues: Cues::default(),
         })
+    }
+
+    fn take_commands(&mut self, commands: &mpsc::Receiver<Command>) {
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                Command::Mode(mode) => self.capture.mode = mode,
+                Command::Processing(p) => self.capture.set_processing(p),
+                Command::Speaker(session, settings) => self.mixer.set_speaker(session, settings),
+                Command::RemoveSpeaker(session) => self.mixer.remove(session),
+                Command::Volume(volume) => {
+                    self.volume = volume.max(0.0);
+                    self.mixer.set_volume(volume);
+                }
+                Command::Bitrate(bitrate) => self.capture.set_bitrate(bitrate),
+                Command::Cue(cue, gain) => self.cues.play(cue, gain),
+            }
+        }
     }
 
     fn run(
@@ -696,25 +724,13 @@ impl Dsp {
         let mut last_housekeeping = Instant::now();
         let mut max_tick = Duration::ZERO;
         let mut mic_level = Envelope::default();
+        // Once the voice source closes, the engine only finishes its cues.
+        let mut source_closed = false;
 
         while !shared.stop.load(Ordering::Relaxed) {
             let tick_start = Instant::now();
 
-            while let Ok(command) = commands.try_recv() {
-                match command {
-                    Command::Mode(mode) => self.capture.mode = mode,
-                    Command::Processing(p) => self.capture.set_processing(p),
-                    Command::Speaker(session, settings) => {
-                        self.mixer.set_speaker(session, settings)
-                    }
-                    Command::RemoveSpeaker(session) => self.mixer.remove(session),
-                    Command::Volume(volume) => {
-                        self.volume = volume.max(0.0);
-                        self.mixer.set_volume(volume);
-                    }
-                    Command::Bitrate(bitrate) => self.capture.set_bitrate(bitrate),
-                }
-            }
+            self.take_commands(commands);
 
             // Incoming voice.
             let deafened = shared.deafened.load(Ordering::Relaxed);
@@ -723,13 +739,14 @@ impl Dsp {
             }
             was_deafened = deafened;
             let mut closed = false;
-            loop {
+            while !source_closed {
                 match source.try_recv() {
                     Ok(Some(voice)) if !deafened => self.mixer.push(voice, tick_start),
                     Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(Closed) => {
                         closed = true;
+                        source_closed = true;
                         break;
                     }
                 }
@@ -754,12 +771,19 @@ impl Dsp {
                 } else {
                     self.playback_bands.decay()
                 };
+                // Cues on top: not someone talking, so not in the spectrum.
+                let cued = self.cues.mix(&mut frame, self.volume);
+                if cued {
+                    for sample in &mut frame {
+                        *sample = soft_clip(*sample);
+                    }
+                }
                 if let Some(recorder) = &mut self.recorder {
                     recorder.push(Track::Playback, &frame);
                 }
                 // Everything played is the echo canceller's reference.
-                // Deafened, nothing plays, so there is no echo to cancel.
-                if !deafened {
+                // Deafened, only cues play.
+                if !deafened || cued {
                     self.capture.render(&frame);
                 }
                 speaker_out.clear();
@@ -865,7 +889,14 @@ impl Dsp {
 
             if closed {
                 log::info!("Voice source closed; stopping audio");
-                break;
+            }
+            if source_closed {
+                // A cue asked for just before the end (a goodbye) may have
+                // arrived during this pass.
+                self.take_commands(commands);
+                if self.cues.is_empty() {
+                    break;
+                }
             }
             // Work that arrived while this pass ran (its wakeup is pending)
             // makes this return at once.
