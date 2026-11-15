@@ -16,6 +16,9 @@ jobs:
   package:
     runs-on: ubuntu-24.04
     env:
+      # The image is built into Docker's store, which podman (also on the
+      # runner, and preferred by the script) can't see.
+      CONTAINER_ENGINE: docker
       BLURT_WINDOWS_IMAGE: blurt-windows-build
       BLURT_WINDOWS_CACHE: ${{ github.workspace }}/../windows-cache
     steps:
