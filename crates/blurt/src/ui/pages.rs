@@ -476,6 +476,7 @@ fn shortcuts<'a>(t: Tokens, on: bool, hotkeys: &'a Hotkeys) -> Element<'a, Messa
             Action::ToggleDeafen => "deafen",
             Action::PushToTalk => "push to talk",
             Action::ShowWindow => "show blurt",
+            Action::Quit => "quit",
         };
         let keys = binding.keys.as_deref().unwrap_or("not set").to_lowercase();
         list = list.push(

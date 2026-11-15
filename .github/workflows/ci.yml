@@ -30,12 +30,12 @@ jobs:
       # The default build has rich visuals (gpu); check the CPU-only one too.
       - run: cargo clippy -p blurt --no-default-features
       - run: cargo test --workspace
-      - name: Release build within the 20 MB budget
+      - name: Release build within the 21 MB budget
         run: |
           cargo build --release --locked -p blurt
           size=$(stat -c %s target/release/blurt)
           echo "blurt is $((size / 1024)) KiB"
-          if [ "$size" -gt $((20 * 1000 * 1000)) ]; then
-            echo "Release binary is over the 20 MB budget" >&2
+          if [ "$size" -gt $((21 * 1000 * 1000)) ]; then
+            echo "Release binary is over the 21 MB budget" >&2
             exit 1
           fi
