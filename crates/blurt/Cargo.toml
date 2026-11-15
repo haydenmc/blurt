@@ -9,9 +9,11 @@ publish = false
 
 [dependencies]
 blurt-audio = { path = "../blurt-audio" }
+blurt-platform = { path = "../blurt-platform" }
 chrono = "0.4.45"
 directories = "6"
-env_logger = "0.11"
+# Without regex filters (RUST_LOG=target/regex), which cost about 600 KB.
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 # tokio, because mumble-protocol spawns its connection tasks on it.
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "crisp", "canvas"] }
 log = "0.4"

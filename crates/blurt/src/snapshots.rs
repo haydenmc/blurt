@@ -182,6 +182,20 @@ fn snapshots() {
         room.step_glow(now + Duration::from_millis(ms));
     }
 
+    let hotkeys = crate::Hotkeys {
+        bindings: vec![
+            blurt_platform::hotkeys::Binding {
+                action: blurt_platform::Action::ToggleMute,
+                keys: Some("Ctrl+Alt+M".into()),
+            },
+            blurt_platform::hotkeys::Binding {
+                action: blurt_platform::Action::ToggleDeafen,
+                keys: None,
+            },
+        ],
+        configurable: true,
+        ..Default::default()
+    };
     let config = Config {
         servers: vec![
             server(),
@@ -264,7 +278,11 @@ fn snapshots() {
                 "settings",
                 t,
                 size,
-                window(t, nav(Page::Settings), pages::settings(t, &config, false)),
+                window(
+                    t,
+                    nav(Page::Settings),
+                    pages::settings(t, &config, false, &hotkeys),
+                ),
             );
         }
     }

@@ -8,10 +8,11 @@ use iced::{Center, Element, Fill, Font, Padding};
 use mumble_protocol::client::Fingerprint;
 
 use super::{label, underline};
-use crate::Message;
 use crate::config::{self, Config, Server};
 use crate::rich::{self, RichVisuals};
 use crate::theme::{self, Accent, Mode, Tokens, size};
+use crate::{Hotkeys, Message};
+use blurt_platform::Action;
 
 /// The add/edit server form.
 #[derive(Debug, Default)]
@@ -287,7 +288,12 @@ pub fn trust<'a>(
 
 /// `rich_now`: whether this run asked for the GPU renderer, to say when a
 /// changed rich visuals setting waits for a restart.
-pub fn settings<'a>(t: Tokens, config: &'a Config, rich_now: bool) -> Element<'a, Message> {
+pub fn settings<'a>(
+    t: Tokens,
+    config: &'a Config,
+    rich_now: bool,
+    hotkeys: &'a Hotkeys,
+) -> Element<'a, Message> {
     let a = &config.appearance;
     let choice = |words: &'static str, active: bool, message: Message| {
         button(text(words).size(20).font(theme::display(if active {
@@ -395,10 +401,66 @@ pub fn settings<'a>(t: Tokens, config: &'a Config, rich_now: bool) -> Element<'a
                 body(t, rich_note(a.rich_visuals, rich_now)),
             ]
             .spacing(6),
+            shortcuts(t, hotkeys),
             body(t, "the accent only ever lights up for live audio."),
         ]
         .spacing(28),
     )
+}
+
+/// Global hotkeys: what each is bound to, and the way to change them (in
+/// the desktop's own settings).
+fn shortcuts<'a>(t: Tokens, hotkeys: &'a Hotkeys) -> Element<'a, Message> {
+    let mut list = Column::new().spacing(4).push(label("shortcuts", t.fg2));
+    if let Some(reason) = &hotkeys.unavailable {
+        return list
+            .push(body(
+                t,
+                format!(
+                    "no global shortcuts on this desktop ({}).",
+                    reason.to_lowercase()
+                ),
+            ))
+            .into();
+    }
+    if hotkeys.bindings.is_empty() {
+        return list.push(body(t, "asking the desktop…")).into();
+    }
+    for binding in &hotkeys.bindings {
+        let name = match binding.action {
+            Action::ToggleMute => "mute",
+            Action::ToggleDeafen => "deafen",
+            Action::PushToTalk => "push to talk",
+            Action::ShowWindow => "show blurt",
+        };
+        let keys = binding.keys.as_deref().unwrap_or("not set").to_lowercase();
+        list = list.push(
+            row![
+                text(name)
+                    .size(20)
+                    .font(theme::display(Weight::Medium))
+                    .style(theme::color(t.fg))
+                    .width(180),
+                text(keys)
+                    .size(size::BODY)
+                    .style(theme::color(if binding.keys.is_some() {
+                        t.fg
+                    } else {
+                        t.fg3
+                    })),
+            ]
+            .align_y(Center)
+            .height(36),
+        );
+    }
+    if hotkeys.configurable {
+        list = list.push(row![quiet_button(
+            t,
+            "change in system settings",
+            Message::ConfigureHotkeys
+        )]);
+    }
+    list.into()
 }
 
 /// What the rich visuals setting does here, and whether it waits for a
