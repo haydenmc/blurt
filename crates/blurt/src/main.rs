@@ -8,12 +8,14 @@ mod room;
 mod session;
 #[cfg(test)]
 mod snapshots;
+mod sounds;
 mod talk;
 mod theme;
 mod transcript;
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blurt_audio::EngineConfig;
@@ -25,6 +27,7 @@ use mumble_protocol::client::{ConnectionOptions, Fingerprint};
 use mumble_protocol::state::MumbleState;
 use room::Room;
 use session::Session;
+use sounds::Sound;
 use theme::{Accent, Mode, Tokens};
 use ui::pages::{self, Editor, Field};
 use ui::voice::{self, progress};
@@ -164,6 +167,7 @@ pub enum Message {
     SetAccent(Accent),
     SetReduceMotion(bool),
     SetRichVisuals(rich::RichVisuals),
+    SetNotificationSounds(bool),
     Hotkey(hotkeys::Event),
     SetGlobalShortcuts(bool),
     ConfigureHotkeys,
@@ -346,23 +350,38 @@ impl Blurt {
             Message::Session(event) => self.on_session(event, now),
 
             Message::ToggleMute => {
+                let sounds = self.sounds();
                 if let Some(c) = self.connected() {
-                    if c.room.deafened {
+                    let sound = if c.room.deafened {
                         // Unmuting while deafened undeafens, as in the
                         // official client.
                         c.room.deafened = false;
                         c.room.muted = false;
                         c.session.set_deafened(false, false);
+                        Sound::Undeafen
                     } else {
                         c.room.muted = !c.room.muted;
                         c.session.set_muted(c.room.muted);
-                    }
+                        if c.room.muted {
+                            Sound::Mute
+                        } else {
+                            Sound::Unmute
+                        }
+                    };
+                    c.play(sounds, sound);
                 }
             }
             Message::ToggleDeafen => {
+                let sounds = self.sounds();
                 if let Some(c) = self.connected() {
                     c.room.deafened = !c.room.deafened;
                     c.session.set_deafened(c.room.deafened, c.room.muted);
+                    let sound = if c.room.deafened {
+                        Sound::Deafen
+                    } else {
+                        Sound::Undeafen
+                    };
+                    c.play(sounds, sound);
                 }
             }
             Message::PushToTalk(held) => {
@@ -393,6 +412,7 @@ impl Blurt {
             }
             Message::Disconnect => {
                 if let Screen::Connected(c) = &self.screen {
+                    c.farewell(self.sounds());
                     c.session.client.disconnect();
                 }
                 self.screen = Screen::Idle;
@@ -419,7 +439,9 @@ impl Blurt {
                             .client
                             .send_channel_message(html::escape(&draft), None)
                         {
-                            Ok(()) => c.refresh(now),
+                            Ok(()) => {
+                                c.refresh(now);
+                            }
                             Err(e) => {
                                 c.room.draft = draft;
                                 self.error = Some(format!("could not send: {e}"));
@@ -522,6 +544,10 @@ impl Blurt {
                 self.config.appearance.reduce_motion = reduce;
                 self.save();
             }
+            Message::SetNotificationSounds(on) => {
+                self.config.audio.notification_sounds = on;
+                self.save();
+            }
         }
         Task::none()
     }
@@ -577,6 +603,7 @@ impl Blurt {
                             _task,
                         };
                         c.refresh(now);
+                        c.play(self.sounds(), Sound::Join);
                         self.screen = Screen::Connected(Box::new(c));
                         self.page = Page::Voice;
                         self.editor = None;
@@ -601,11 +628,28 @@ impl Blurt {
                 }
             }
             Event::Changed => {
+                let sounds = self.sounds();
                 if let Some(c) = self.connected() {
-                    c.refresh(now);
+                    let news = c.refresh(now);
+                    // One sound a change, the most interesting.
+                    let sound = if news.message {
+                        Some(Sound::Message)
+                    } else if news.joined {
+                        Some(Sound::Join)
+                    } else if news.left {
+                        Some(Sound::Leave)
+                    } else {
+                        None
+                    };
+                    if let Some(sound) = sound {
+                        c.play(sounds, sound);
+                    }
                 }
             }
             Event::Ended(error) => {
+                if let Screen::Connected(c) = &self.screen {
+                    c.farewell(self.sounds());
+                }
                 if matches!(
                     self.screen,
                     Screen::Connected(_) | Screen::Connecting { .. }
@@ -620,6 +664,11 @@ impl Blurt {
                 }
             }
         }
+    }
+
+    /// Whether notification sounds are on.
+    fn sounds(&self) -> bool {
+        self.config.audio.notification_sounds
     }
 
     /// Whether the room glow can show: rich visuals asked for at startup,
@@ -751,10 +800,36 @@ impl Blurt {
 }
 
 impl Connected {
-    /// Re-reads the client's state after it changed.
-    fn refresh(&mut self, now: Instant) {
+    /// Re-reads the client's state after it changed; returns what's new
+    /// in the transcript.
+    fn refresh(&mut self, now: Instant) -> transcript::News {
         let state = self.session.client.state().lock().unwrap().clone();
-        self.room.update(state, now);
+        self.room.update(state, now)
+    }
+
+    fn play(&self, enabled: bool, sound: Sound) {
+        if enabled {
+            sound.play(&self.session.engine);
+        }
+    }
+
+    /// Before the connection ends: the leave sound, if wanted, played out
+    /// by the engine after the session is gone (it finishes its cues, then
+    /// stops), with the mic shut meanwhile.
+    fn farewell(&self, sounds: bool) {
+        if !sounds {
+            return;
+        }
+        let engine = Arc::clone(&self.session.engine);
+        engine.set_muted(true);
+        Sound::Leave.play(&engine);
+        std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(4);
+            while !engine.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            drop(engine);
+        });
     }
 
     fn apply_push_to_talk(&self) {

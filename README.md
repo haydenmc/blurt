@@ -63,6 +63,18 @@ flatpak-builder --user --install-deps-from=flathub --force-clean \
 Changes to `crates/mumble-protocol` go back upstream to Mumbo; see
 [docs/upstream.md](docs/upstream.md) for the commit rules and the export script.
 
+## Sound effect attribution
+
+The notification sounds in `crates/blurt/assets/sounds/` (join/leave/message/
+mute/deafen, toggleable in settings) are sourced from Pixabay, transcoded to
+mono Opus:
+
+- `join.opus`: [Film Special Effects Notification 1](https://pixabay.com/sound-effects/film-special-effects-notification-1-269296/)
+- `leave.opus`: [Film Special Effects Notification 1 (reversed)](https://pixabay.com/sound-effects/film-special-effects-notification-1-reversed-317859/)
+- `message.opus`: [App Interface Click 2](https://pixabay.com/sound-effects/app-interface-click-2-476372/)
+- `off.opus` (mute, deafen): [Film Special Effects UI Sound Off](https://pixabay.com/sound-effects/film-special-effects-ui-sound-off-270300/)
+- `on.opus` (unmute, undeafen): [Film Special Effects UI Sound On](https://pixabay.com/sound-effects/film-special-effects-ui-sound-on-270295/)
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).

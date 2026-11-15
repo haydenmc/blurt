@@ -377,6 +377,27 @@ pub fn settings<'a>(
             ),
             column![
                 section(
+                    "notification sounds",
+                    row![
+                        choice(
+                            "on",
+                            config.audio.notification_sounds,
+                            Message::SetNotificationSounds(true)
+                        ),
+                        choice(
+                            "off",
+                            !config.audio.notification_sounds,
+                            Message::SetNotificationSounds(false)
+                        ),
+                    ]
+                    .spacing(24)
+                    .into()
+                ),
+                body(t, "joins, leaves, messages, and your mute and deafen."),
+            ]
+            .spacing(6),
+            column![
+                section(
                     "rich visuals",
                     row![
                         choice(
