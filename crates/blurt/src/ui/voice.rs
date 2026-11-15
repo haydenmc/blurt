@@ -67,10 +67,6 @@ impl Voice<'_> {
             .get(&session)
             .map_or(0.0, |a| a.interpolate(0.0, 1.0, self.now))
     }
-
-    fn display_name<'b>(&self, user: &'b User) -> &'b str {
-        if user.is_me { "you" } else { &user.name }
-    }
 }
 
 pub fn view<'a>(v: &Voice<'a>) -> Element<'a, Message> {
@@ -362,7 +358,7 @@ fn person<'a>(v: &Voice<'a>, user: &User, size: f32) -> Element<'a, Message> {
     let talking = v.talking(user.session);
     let idle = if muted || deafened { t.fg3 } else { t.fg_name };
     let mut row = row![
-        text(v.display_name(user).to_owned())
+        text(user.name.clone())
             .size(size)
             .font(theme::ui(if talking > 0.5 {
                 Weight::Bold
@@ -398,7 +394,7 @@ fn talking_line<'a>(v: &Voice<'a>, size: f32) -> Element<'a, Message> {
         };
         // Colour shows talking right now; position keeps the hold.
         let talking = v.talking(spoke.session);
-        let name = text(v.display_name(user).to_owned())
+        let name = text(user.name.clone())
             .size(size)
             .font(theme::ui(if talking > 0.5 {
                 Weight::Bold
@@ -513,7 +509,7 @@ fn channels<'a>(v: &Voice<'a>) -> Element<'a, Message> {
         let who: Vec<&str> = v
             .members(channel.channel_id)
             .into_iter()
-            .map(|u| v.display_name(u))
+            .map(|u| u.name.as_str())
             .collect();
         let mut title = row![
             text(channel.name.clone())

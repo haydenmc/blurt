@@ -26,7 +26,7 @@ fn server() -> Server {
         label: "Nightjar".into(),
         host: "voice.example.org".into(),
         port: 64738,
-        username: "me".into(),
+        username: "swift".into(),
         password: None,
     }
 }
@@ -64,7 +64,7 @@ fn room(now: Instant) -> Room {
     ] {
         state.channels.insert(c.channel_id, c);
     }
-    let mut me = user(1, "me", 2);
+    let mut me = user(1, "swift", 2);
     me.is_me = true;
     let mut kestrel = user(2, "kestrel", 2);
     kestrel.is_speaking = true;

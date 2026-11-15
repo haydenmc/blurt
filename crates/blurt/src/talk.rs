@@ -12,9 +12,23 @@ pub const MAX: usize = 6;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
-    /// When they started talking, or (while silent) when they stopped.
-    since: Instant,
-    talking: bool,
+    /// When this spell of talking began. Pauses within [`HOLD`] don't end
+    /// a spell, so the talking group keeps its order while people talk.
+    started: Instant,
+    /// When they last stopped; `None` while talking.
+    stopped: Option<Instant>,
+}
+
+impl Entry {
+    fn talking(&self) -> bool {
+        self.stopped.is_none()
+    }
+
+    /// Talking, or stopped within the hold.
+    fn held(&self, now: Instant) -> bool {
+        self.stopped
+            .is_none_or(|stopped| now.duration_since(stopped) < HOLD)
+    }
 }
 
 /// Talking state per session, local to this channel visit.
@@ -39,20 +53,21 @@ impl TalkLog {
     /// state; only changes are recorded.
     pub fn observe(&mut self, session: u32, talking: bool, now: Instant) {
         match self.entries.get_mut(&session) {
-            Some(entry) if entry.talking == talking => {}
-            Some(entry) => {
-                // Starting again inside the hold keeps their place.
-                if !(talking && now.duration_since(entry.since) < HOLD) {
-                    entry.since = now;
+            Some(entry) if entry.talking() == talking => {}
+            Some(entry) if talking => {
+                // Starting again inside the hold continues the spell.
+                if !entry.held(now) {
+                    entry.started = now;
                 }
-                entry.talking = talking;
+                entry.stopped = None;
             }
+            Some(entry) => entry.stopped = Some(now),
             None if talking => {
                 self.entries.insert(
                     session,
                     Entry {
-                        since: now,
-                        talking: true,
+                        started: now,
+                        stopped: None,
                     },
                 );
             }
@@ -62,7 +77,7 @@ impl TalkLog {
 
     /// Talking at this moment; no hold.
     pub fn speaking(&self, session: u32) -> bool {
-        self.entries.get(&session).is_some_and(|e| e.talking)
+        self.entries.get(&session).is_some_and(Entry::talking)
     }
 
     /// Forgets everyone; e.g. on changing channel.
@@ -75,16 +90,20 @@ impl TalkLog {
         self.entries.retain(|&session, _| present(session));
     }
 
-    /// The line: people talking first, then the rest, newest first.
+    /// The line: people talking first, newest spell first, then the rest,
+    /// most recently stopped first.
     pub fn line(&self, now: Instant) -> Vec<Spoke> {
         let mut line: Vec<(Instant, Spoke)> = self
             .entries
             .iter()
             .map(|(&session, e)| {
-                let talking = e.talking || now.duration_since(e.since) < HOLD;
-                let ago = (!talking).then(|| now.duration_since(e.since));
+                let talking = e.held(now);
+                let (key, ago) = match e.stopped {
+                    Some(stopped) if !talking => (stopped, Some(now.duration_since(stopped))),
+                    _ => (e.started, None),
+                };
                 (
-                    e.since,
+                    key,
                     Spoke {
                         session,
                         talking,
@@ -161,6 +180,35 @@ mod tests {
         let order: Vec<u32> = line.iter().map(|s| s.session).collect();
         assert_eq!(order, [3, 2, 1]);
         assert!(line[0].talking && !line[1].talking);
+    }
+
+    #[test]
+    fn pausing_keeps_your_place_among_the_talkers() {
+        let t0 = Instant::now();
+        let mut log = TalkLog::default();
+        // 1 started first, then 2: 2 leads.
+        log.observe(1, true, t0);
+        log.observe(2, true, at(t0, 500));
+        let order = |log: &TalkLog, ms| -> Vec<u32> {
+            log.line(at(t0, ms)).iter().map(|s| s.session).collect()
+        };
+        assert_eq!(order(&log, 600), [2, 1]);
+        // 1 pauses and resumes within the hold, more than once: no change.
+        log.observe(1, false, at(t0, 1000));
+        assert_eq!(order(&log, 1100), [2, 1]);
+        log.observe(1, true, at(t0, 1500));
+        log.observe(1, false, at(t0, 2000));
+        log.observe(1, true, at(t0, 3000));
+        assert_eq!(order(&log, 3100), [2, 1]);
+        // 2 pauses too: still no change.
+        log.observe(2, false, at(t0, 3200));
+        assert_eq!(order(&log, 3300), [2, 1]);
+        // 2's pause outlasts the hold, so they move to the history...
+        assert_eq!(order(&log, 5000), [1, 2]);
+        assert!(!log.line(at(t0, 5000))[1].talking);
+        // ...and coming back is a new spell, at the front.
+        log.observe(2, true, at(t0, 6000));
+        assert_eq!(order(&log, 6100), [2, 1]);
     }
 
     #[test]
