@@ -55,6 +55,7 @@ Threads: the cpal input callback, the cpal output callback, and one **DSP thread
   - Server list: favorites, saved credentials, and UDP ping, user count, and latency through `get_server_stats`.
   - Main view: a channel tree with users, talking/mute/deaf indicators, double-click to join, and a per-user volume menu. Plus a chat pane that sanitizes Mumble's HTML to plain or rich text and shows inline images up to `image_message_length`.
   - Settings: input/output device, VAD threshold with a live meter, PTT, NS/AEC/AGC toggles, frame size, hotkey bindings, theme.
+  - Backlog: a transmit-mode setting with a strict push-to-talk mode (send only while the key or the pill is held). Today the engine runs voice activity, and holding push-to-talk also transmits.
 - Config is TOML under `directories` config_dir. Passwords live in the OS keyring (`keyring`), and the client cert is stored next to the config.
 - Allocator: mimalloc. Logging: `tracing`, with a ring buffer that the UI can show.
 
@@ -71,7 +72,7 @@ Tray and portals need the host D-Bus session bus. Mount `${XDG_RUNTIME_DIR}/bus`
 
 ## Budgets (checked from milestone 3 on)
 - Client-side mouth-to-wire under about 20 ms with 10 ms frames, and jitter-buffer target plus playout under about 40 ms on a good network.
-- Idle CPU under 1.5% while connected and silent (relaxed from 1% on 2026-11-14 after measuring full AEC/NS/AGC on PipeWire at about 1.7%). RSS with the window closed (tray only) aims for under 40 MB. Release binary under about 15 MB.
+- Idle CPU under 1.5% while connected and silent (relaxed from 1% on 2026-11-14 after measuring full AEC/NS/AGC on PipeWire at about 1.7%). RSS with the window closed (tray only) aims for under 40 MB. Release binary under about 20 MB (raised from 15 MB to fit bundled fonts and, later, wgpu).
 
 ## Verification
 - `cargo test --workspace`: crypt vectors, codec round-trips, the state reducer against mumbo's fixtures, and the DSP chain on synthetic signals (an echo of a reference tone should drop by at least 20 dB after AEC, and a 1 kHz tone should come through the encode/decode round-trip).

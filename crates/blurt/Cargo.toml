@@ -9,10 +9,11 @@ publish = false
 
 [dependencies]
 blurt-audio = { path = "../blurt-audio" }
+chrono = "0.4.45"
 directories = "6"
 env_logger = "0.11"
 # tokio, because mumble-protocol spawns its connection tasks on it.
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "crisp"] }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "wayland", "x11", "tokio", "crisp", "canvas"] }
 log = "0.4"
 mumble-protocol = { path = "../mumble-protocol" }
 serde = { version = "1", features = ["derive"] }
@@ -26,3 +27,6 @@ pipewire = ["blurt-audio/pipewire"]
 # Render with the GPU (wgpu) instead of the CPU (tiny-skia). blurt's UI is
 # mostly text, which tiny-skia draws with far less memory.
 gpu = ["iced/wgpu"]
+
+[dev-dependencies]
+iced_test = "0.14"
