@@ -10,6 +10,11 @@ use iced::{Element, Fill};
 
 use crate::theme::{self, Tokens};
 
+/// How far page content and the title bar's words sit from the window's
+/// sides: the same as the close glyph's inset from the right edge, and
+/// about the words' inset from the top.
+pub const INSET: f32 = 22.0;
+
 /// Below this window width, the compact layout.
 pub const BREAKPOINT: f32 = 720.0;
 /// So a window resized right at the breakpoint doesn't flip back and forth.

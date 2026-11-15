@@ -232,7 +232,7 @@ fn page_links<'a>(t: Tokens) -> Element<'a, Message> {
 pub fn compact_header<'a>(t: Tokens, server: &str) -> Element<'a, Message> {
     row![label(server, t.fg2), space::horizontal(), page_links(t)]
         .align_y(Center)
-        .padding(Padding::ZERO.left(20.0).right(8.0))
+        .padding(Padding::ZERO.left(super::INSET).right(8.0).top(6))
         .into()
 }
 
@@ -271,9 +271,10 @@ pub fn nav_row<'a>(
     // The title bar adds the right-hand padding before its glyphs.
     let mut row = row![nav, space::horizontal()]
         .align_y(Center)
-        .padding(Padding::ZERO.left(32.0).right(16.0));
+        .padding(Padding::ZERO.left(super::INSET).right(16.0));
     if let Some(server) = server {
-        row = row.push(label(server, t.fg2));
+        // Down to the glyphs' line (see `chrome::title_bar`).
+        row = row.push(container(label(server, t.fg2)).padding(Padding::ZERO.top(6)));
     }
     row.into()
 }

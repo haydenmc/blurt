@@ -36,16 +36,19 @@ pub fn title_bar<'a>(t: Tokens, content: Element<'a, Message>) -> Element<'a, Me
     )
     .on_press(Message::Drag)
     .on_double_click(Message::ToggleMaximize);
-    row![
-        drag,
+    // Nudged down to the middle of the words' lowercase letters, which
+    // sits below the middle of their line.
+    let glyphs = iced::widget::container(row![
         glyph(Glyph::Minimize, Message::Minimize, "minimize"),
         glyph(Glyph::Maximize, Message::ToggleMaximize, "maximize"),
         glyph(Glyph::Close, Message::CloseWindow, "close"),
-    ]
-    .height(iced::Shrink)
-    .align_y(iced::Center)
-    .padding(iced::Padding::ZERO.right(4))
-    .into()
+    ])
+    .padding(iced::Padding::ZERO.top(6));
+    row![drag, glyphs]
+        .height(iced::Shrink)
+        .align_y(iced::Center)
+        .padding(iced::Padding::ZERO.right(4))
+        .into()
 }
 
 /// A tooltip's words: the label for an icon-only button.

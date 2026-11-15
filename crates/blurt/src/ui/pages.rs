@@ -95,9 +95,9 @@ fn page<'a>(t: Tokens, content: impl Into<Element<'a, Message>>) -> Element<'a, 
         container(content)
             .padding(Padding {
                 top: 24.0,
-                right: 32.0,
+                right: super::INSET,
                 bottom: 32.0,
-                left: 32.0,
+                left: super::INSET,
             })
             .max_width(720),
     )
@@ -385,7 +385,7 @@ pub fn error_banner<'a>(t: Tokens, error: &'a str) -> Element<'a, Message> {
         .spacing(12)
         .align_y(Center),
     )
-    .padding([0, 32])
+    .padding([0.0, super::INSET])
     .style(theme::fill(t.raise))
     .into()
 }
