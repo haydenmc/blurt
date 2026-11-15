@@ -51,10 +51,18 @@ impl Envelope {
 }
 
 /// How many bands [`Bands`] splits a signal into.
-pub const BANDS: usize = 8;
+pub const BANDS: usize = 16;
 
-/// The bands' centre frequencies: log-spaced over the voice's range.
-pub const BAND_CENTRES: [f32; BANDS] = [125.0, 220.0, 390.0, 690.0, 1200.0, 2100.0, 3700.0, 6500.0];
+/// The bands' centre frequencies: log-spaced, about 0.4 octave apart, over
+/// the voice's range (100 Hz to 8 kHz).
+pub const BAND_CENTRES: [f32; BANDS] = [
+    100.0, 134.0, 180.0, 240.0, 320.0, 430.0, 575.0, 770.0, 1030.0, 1380.0, 1850.0, 2480.0, 3320.0,
+    4440.0, 5950.0, 8000.0,
+];
+
+/// The band-pass filters' Q: as wide as the bands' spacing, so together
+/// they cover the range without much overlap.
+const BAND_Q: f32 = 3.0;
 
 /// A signal's level in [`BANDS`] frequency bands, lowest first, each
 /// smoothed like [`Envelope`]. For spectrum displays, not measurement: a
@@ -74,7 +82,7 @@ impl Default for Bands {
 impl Bands {
     pub fn new() -> Self {
         Self {
-            filters: BAND_CENTRES.map(|f| Biquad::band_pass(f, 1.6)),
+            filters: BAND_CENTRES.map(|f| Biquad::band_pass(f, BAND_Q)),
             levels: [Envelope::default(); BANDS],
         }
     }
