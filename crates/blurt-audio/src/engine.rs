@@ -19,7 +19,7 @@ use cpal::{FromSample, SizedSample};
 use crate::capture::{Capture, Processing, TransmitMode};
 use crate::codec::EncoderConfig;
 use crate::jitter::JitterConfig;
-use crate::level::{self, Envelope};
+use crate::level::{self, BANDS, Bands, Envelope};
 use crate::mixer::{Mixer, SpeakerSettings};
 use crate::recorder::{Recorder, Track};
 use crate::resample::Resampler;
@@ -179,6 +179,16 @@ pub struct EngineStats {
     pub max_tick: Duration,
 }
 
+/// What's playing and what you're sending, in [`BANDS`] frequency bands
+/// (lowest first, linear RMS, smoothed), for spectrum displays.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Spectrum {
+    /// Everyone you hear, before the output volume.
+    pub playback: [f32; BANDS],
+    /// Your voice while it's being sent; silence otherwise.
+    pub mic: [f32; BANDS],
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
@@ -198,6 +208,8 @@ struct Shared {
     /// Smoothed level per speaker, refreshed whenever audio is mixed. The
     /// DSP thread only ever `try_lock`s it, so a reader can't stall audio.
     speaker_levels: Mutex<Vec<(u32, f32)>>,
+    /// Like `speaker_levels`, only ever `try_lock`ed by the DSP thread.
+    spectrum: Mutex<Spectrum>,
 }
 
 enum Command {
@@ -325,6 +337,11 @@ impl Engine {
             .lock()
             .map(|levels| levels.clone())
             .unwrap_or_default()
+    }
+
+    /// What's playing and what you're sending, by frequency band.
+    pub fn spectrum(&self) -> Spectrum {
+        self.shared.spectrum.lock().map(|s| *s).unwrap_or_default()
     }
 
     /// Forgets a speaker who left the server.
@@ -636,6 +653,11 @@ struct Dsp {
     playback_target: usize,
     speaker_capacity: usize,
     recorder: Option<Recorder>,
+    /// The output volume, to take back out of the mix for `spectrum`.
+    volume: f32,
+    spectrum: Spectrum,
+    playback_bands: Bands,
+    mic_bands: Bands,
 }
 
 impl Dsp {
@@ -652,6 +674,10 @@ impl Dsp {
                 .as_deref()
                 .map(Recorder::start)
                 .transpose()?,
+            volume: 1.0,
+            spectrum: Spectrum::default(),
+            playback_bands: Bands::new(),
+            mic_bands: Bands::new(),
         })
     }
 
@@ -682,7 +708,10 @@ impl Dsp {
                         self.mixer.set_speaker(session, settings)
                     }
                     Command::RemoveSpeaker(session) => self.mixer.remove(session),
-                    Command::Volume(volume) => self.mixer.set_volume(volume),
+                    Command::Volume(volume) => {
+                        self.volume = volume.max(0.0);
+                        self.mixer.set_volume(volume);
+                    }
                     Command::Bitrate(bitrate) => self.capture.set_bitrate(bitrate),
                 }
             }
@@ -712,12 +741,19 @@ impl Dsp {
             let mut speakers = None;
             while self.speaker_capacity - devices.speaker.slots() < self.playback_target {
                 let mut frame = [0.0; FRAME_SAMPLES];
-                if !deafened {
-                    let mixed = self.mixer.mix(&mut frame);
-                    speakers = Some(speakers.unwrap_or(0).max(mixed));
+                let mixed = if !deafened {
+                    self.mixer.mix(&mut frame)
                 } else {
-                    speakers = Some(0);
-                }
+                    0
+                };
+                speakers = Some(speakers.unwrap_or(0).max(mixed));
+                // The spectrum shows who's talking whatever the volume.
+                self.spectrum.playback = if mixed > 0 && self.volume > 0.001 {
+                    let unscaled = frame.map(|s| s / self.volume);
+                    self.playback_bands.step(&unscaled)
+                } else {
+                    self.playback_bands.decay()
+                };
                 if let Some(recorder) = &mut self.recorder {
                     recorder.push(Track::Playback, &frame);
                 }
@@ -764,6 +800,11 @@ impl Dsp {
                     recorder.push(Track::Sent, sent);
                 }
                 consumed += FRAME_SAMPLES;
+                self.spectrum.mic = if report.transmitting {
+                    self.mic_bands.step(self.capture.processed())
+                } else {
+                    self.mic_bands.decay()
+                };
                 // Processed audio is silence while muted, so the meter rests.
                 let level = mic_level.step(level::rms(self.capture.processed()));
                 shared.mic_level.store(level.to_bits(), Ordering::Relaxed);
@@ -784,6 +825,9 @@ impl Dsp {
                     levels.clear();
                     levels.extend(self.mixer.levels());
                 }
+            }
+            if let Ok(mut spectrum) = shared.spectrum.try_lock() {
+                *spectrum = self.spectrum;
             }
 
             // Once a second: tidy up and refresh the echo canceller's delay.

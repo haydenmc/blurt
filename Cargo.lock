@@ -431,6 +431,7 @@ dependencies = [
  "iced_test",
  "log",
  "mumble-protocol",
+ "naga",
  "serde",
  "tokio",
  "toml",

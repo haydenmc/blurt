@@ -22,11 +22,14 @@ toml = "1"
 
 [features]
 # The native PipeWire audio host (needs libpipewire-0.3 and libclang to build).
-default = ["pipewire"]
+default = ["pipewire", "gpu"]
 pipewire = ["blurt-audio/pipewire"]
-# Render with the GPU (wgpu) instead of the CPU (tiny-skia). blurt's UI is
-# mostly text, which tiny-skia draws with far less memory.
-gpu = ["iced/wgpu"]
+# "Rich visuals": able to render with the GPU (wgpu) as well as the CPU
+# (tiny-skia), for the room glow. Which one draws is a setting, picked at
+# startup; tiny-skia stays the default where memory is short, since blurt's
+# UI is mostly text, which it draws with far less memory.
+gpu = ["iced/wgpu", "iced/advanced"]
 
 [dev-dependencies]
 iced_test = "0.14"
+naga = { version = "27.0.3", features = ["wgsl-in"] }

@@ -16,6 +16,8 @@ finish-args:
   - --share=network
   - --socket=wayland
   - --socket=fallback-x11
+  # Rich visuals (the room glow) draw with the GPU.
+  - --device=dri
   # Audio: native PipeWire for the lowest latency (as the official Mumble
   # Flatpak does), PulseAudio where there's no PipeWire.
   - --socket=pulseaudio

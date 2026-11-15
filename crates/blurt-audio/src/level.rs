@@ -50,9 +50,152 @@ impl Envelope {
     }
 }
 
+/// How many bands [`Bands`] splits a signal into.
+pub const BANDS: usize = 16;
+
+/// The bands' centre frequencies: log-spaced, about 0.4 octave apart, over
+/// the voice's range (100 Hz to 8 kHz).
+pub const BAND_CENTRES: [f32; BANDS] = [
+    100.0, 134.0, 180.0, 240.0, 320.0, 430.0, 575.0, 770.0, 1030.0, 1380.0, 1850.0, 2480.0, 3320.0,
+    4440.0, 5950.0, 8000.0,
+];
+
+/// The band-pass filters' Q: as wide as the bands' spacing, so together
+/// they cover the range without much overlap.
+const BAND_Q: f32 = 3.0;
+
+/// A signal's level in [`BANDS`] frequency bands, lowest first, each
+/// smoothed like [`Envelope`]. For spectrum displays, not measurement: a
+/// bank of band-pass filters, cheaper than an FFT at this resolution.
+#[derive(Debug, Clone)]
+pub struct Bands {
+    filters: [Biquad; BANDS],
+    levels: [Envelope; BANDS],
+}
+
+impl Default for Bands {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Bands {
+    pub fn new() -> Self {
+        Self {
+            filters: BAND_CENTRES.map(|f| Biquad::band_pass(f, BAND_Q)),
+            levels: [Envelope::default(); BANDS],
+        }
+    }
+
+    /// Analyses one frame and returns the updated levels (linear RMS).
+    pub fn step(&mut self, frame: &[f32; FRAME_SAMPLES]) -> [f32; BANDS] {
+        for (filter, level) in self.filters.iter_mut().zip(&mut self.levels) {
+            let mut sum = 0.0;
+            for &x in frame {
+                let y = filter.process(x);
+                sum += y * y;
+            }
+            level.step((sum / FRAME_SAMPLES as f32).sqrt());
+        }
+        self.levels()
+    }
+
+    /// Lets the levels fall as if a silent frame went by, without filtering.
+    pub fn decay(&mut self) -> [f32; BANDS] {
+        for level in &mut self.levels {
+            level.step(0.0);
+        }
+        self.levels()
+    }
+
+    pub fn levels(&self) -> [f32; BANDS] {
+        std::array::from_fn(|i| self.levels[i].value())
+    }
+}
+
+/// A second-order filter (RBJ cookbook), direct form I.
+#[derive(Debug, Clone, Copy)]
+struct Biquad {
+    b: [f32; 3],
+    a: [f32; 2],
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl Biquad {
+    /// Band-pass with 0 dB gain at `centre` Hz.
+    fn band_pass(centre: f32, q: f32) -> Self {
+        let w = std::f32::consts::TAU * centre / crate::SAMPLE_RATE as f32;
+        let alpha = w.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b: [alpha / a0, 0.0, -alpha / a0],
+            a: [-2.0 * w.cos() / a0, (1.0 - alpha) / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b[0] * x + self.b[1] * self.x[0] + self.b[2] * self.x[1]
+            - self.a[0] * self.y[0]
+            - self.a[1] * self.y[1];
+        self.x = [x, self.x[0]];
+        // Flush denormals so silence stays cheap.
+        let y = if y.abs() < 1e-20 { 0.0 } else { y };
+        self.y = [y, self.y[0]];
+        y
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sine(freq: f32, frames: usize) -> Vec<[f32; FRAME_SAMPLES]> {
+        (0..frames)
+            .map(|f| {
+                std::array::from_fn(|i| {
+                    let n = (f * FRAME_SAMPLES + i) as f32;
+                    0.5 * (std::f32::consts::TAU * freq * n / crate::SAMPLE_RATE as f32).sin()
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tone_lights_its_own_band() {
+        for (band, &centre) in BAND_CENTRES.iter().enumerate() {
+            let mut bands = Bands::new();
+            let mut levels = [0.0; BANDS];
+            for frame in sine(centre, 30) {
+                levels = bands.step(&frame);
+            }
+            let loudest = (0..BANDS)
+                .max_by(|&a, &b| levels[a].total_cmp(&levels[b]))
+                .unwrap();
+            assert_eq!(loudest, band, "{centre} Hz: {levels:?}");
+            // About the tone's RMS (0.35) in its own band.
+            assert!(
+                (0.25..0.45).contains(&levels[band]),
+                "{centre} Hz: {levels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bands_fall_back_to_silence() {
+        let mut bands = Bands::new();
+        for frame in sine(1200.0, 10) {
+            bands.step(&frame);
+        }
+        let silence = [0.0; FRAME_SAMPLES];
+        for _ in 0..1000 {
+            bands.step(&silence);
+        }
+        assert_eq!(bands.levels(), [0.0; BANDS]);
+        assert_eq!(bands.decay(), [0.0; BANDS]);
+    }
 
     #[test]
     fn rms_of_a_constant_is_the_constant() {

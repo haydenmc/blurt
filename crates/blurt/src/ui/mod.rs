@@ -1,6 +1,8 @@
 //! Views. Each takes the [`Tokens`] it styles with; none hold state.
 
 pub mod chrome;
+#[cfg(feature = "gpu")]
+pub mod glow;
 pub mod meter;
 pub mod pages;
 pub mod voice;

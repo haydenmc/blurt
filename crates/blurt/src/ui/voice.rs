@@ -15,7 +15,7 @@ use super::chrome::tip;
 use super::{Layout, Page, Pivot, label, meter, underline};
 use crate::icons::{self, Glyph};
 use crate::room::Room;
-use crate::theme::{self, ON_ACCENT, Tokens, alpha, mix, size};
+use crate::theme::{self, ON_ACCENT, Tokens, mix, size};
 use crate::transcript::{self, Entry};
 use crate::{Message, talk};
 
@@ -28,6 +28,9 @@ pub struct Voice<'a> {
     pub layout: Layout,
     pub reduce_motion: bool,
     pub volume: f32,
+    /// Draw the room glow (rich visuals).
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub glow: bool,
 }
 
 impl Voice<'_> {
@@ -115,7 +118,7 @@ fn wide<'a>(v: &Voice<'a>) -> Element<'a, Message> {
     .height(Fill);
     let server = v.room.server.label.as_str();
     column![
-        stack![decoration(t, server), body].height(Fill),
+        stack![decoration(t, server), body, room_glow(v)].height(Fill),
         control_bar(v),
     ]
     .into()
@@ -131,7 +134,7 @@ fn decoration<'a>(t: Tokens, server: &str) -> Element<'a, Message> {
             .font(theme::display(Weight::ExtraBold))
             .line_height(LineHeight::Relative(0.92))
             .wrapping(Wrapping::None)
-            .style(theme::color(alpha(t.fg, 0.03))))
+            .style(theme::color(mix(t.bg, t.fg, 0.03))))
         .x(0.0)
         .y(-SIZE * 0.18),
     )
@@ -187,29 +190,45 @@ fn compact<'a>(v: &Voice<'a>) -> Element<'a, Message> {
         .padding(Padding::ZERO.left(40.0 * (1.0 - shown)))
         .height(Fill);
 
-    column![
-        column![
-            container(hero).clip(true).width(Fill),
-            talking_line(v, size::BODY),
-            container(
-                scrollable(pivots).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(0).scroller_width(0)
-                ))
-            )
-            .clip(true),
-            content,
-        ]
-        .spacing(14)
-        .padding(Padding {
-            top: 4.0,
-            right: 20.0,
-            bottom: 16.0,
-            left: 20.0,
-        })
-        .height(Fill),
-        control_bar(v),
+    let upper = column![
+        container(hero).clip(true).width(Fill),
+        talking_line(v, size::BODY),
+        container(
+            scrollable(pivots).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(0).scroller_width(0)
+            ))
+        )
+        .clip(true),
+        content,
     ]
-    .into()
+    .spacing(14)
+    .padding(Padding {
+        top: 4.0,
+        right: 20.0,
+        bottom: 16.0,
+        left: 20.0,
+    })
+    .height(Fill);
+    column![stack![upper, room_glow(v)].height(Fill), control_bar(v),].into()
+}
+
+/// The room glow, standing on the control bar's top edge (rich visuals
+/// only; nothing otherwise).
+fn room_glow<'a>(v: &Voice<'a>) -> Element<'a, Message> {
+    #[cfg(feature = "gpu")]
+    if v.glow && v.room.glow.visible() {
+        let compact = v.layout == Layout::Compact;
+        let params = super::glow::params(&v.room.glow, compact, v.t);
+        if params.visible() {
+            let height = if compact { 90.0 } else { 140.0 };
+            return container(super::glow::glow(params, height))
+                .height(Fill)
+                .align_bottom(Fill)
+                .into();
+        }
+    }
+    let _ = v;
+    space().into()
 }
 
 /// In compact, the way to the other pages: two quiet words.
