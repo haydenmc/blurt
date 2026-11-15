@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "blurt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blurt-audio",
  "blurt-platform",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "blurt-audio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "audioadapter-buffers",
  "cpal",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "blurt-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blurt-audio",
  "env_logger",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "blurt-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ashpd",
  "futures-channel",
