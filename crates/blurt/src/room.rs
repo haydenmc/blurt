@@ -69,11 +69,13 @@ impl Room {
         }
     }
 
-    /// Takes the client's state after it changed.
-    pub fn update(&mut self, state: MumbleState, now: Instant) {
+    /// Takes the client's state after it changed; returns what's new in
+    /// the transcript.
+    pub fn update(&mut self, state: MumbleState, now: Instant) -> transcript::News {
         self.state = state;
-        self.transcript.sync(&self.state, chrono::Utc::now());
+        let news = self.transcript.sync(&self.state, chrono::Utc::now());
         self.observe_talking(now);
+        news
     }
 
     /// How loud each person in your channel is, 0 to 1, you included while

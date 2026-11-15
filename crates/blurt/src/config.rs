@@ -47,11 +47,16 @@ pub struct Appearance {
 pub struct Audio {
     /// Master output volume, 0 to 1.
     pub output_volume: f32,
+    /// Sounds for joins, leaves, messages, and your mute and deafen.
+    pub notification_sounds: bool,
 }
 
 impl Default for Audio {
     fn default() -> Self {
-        Self { output_volume: 1.0 }
+        Self {
+            output_volume: 1.0,
+            notification_sounds: true,
+        }
     }
 }
 

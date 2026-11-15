@@ -37,6 +37,17 @@ pub struct Transcript {
     members: BTreeMap<u32, String>,
 }
 
+/// What a [`Transcript::sync`] added, for notification sounds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct News {
+    /// Someone came into your channel.
+    pub joined: bool,
+    /// Someone left your channel.
+    pub left: bool,
+    /// A chat message from someone else (or the server).
+    pub message: bool,
+}
+
 impl Transcript {
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -45,13 +56,19 @@ impl Transcript {
     /// Catches up with `state`: appends new messages, and joins and leaves
     /// in your channel since the last sync. Changing channel yourself
     /// doesn't list everyone already there as joining.
-    pub fn sync(&mut self, state: &MumbleState, now: DateTime<Utc>) {
+    pub fn sync(&mut self, state: &MumbleState, now: DateTime<Utc>) -> News {
+        let mut news = News::default();
+        let me = state.current_user().map(|u| u.session);
         let messages = state.chat_messages();
         if messages.len() < self.seen {
             // The state was reset (e.g. a new connection).
             self.seen = 0;
         }
         for message in &messages[self.seen..] {
+            news.message |= match message {
+                TextMessage::ChatTextMessage(m) => m.actor.is_none() || m.actor != me,
+                TextMessage::ServerTextMessage(_) => true,
+            };
             self.entries.push(match message {
                 TextMessage::ChatTextMessage(m) => Entry::Message {
                     author: Some(
@@ -72,7 +89,7 @@ impl Transcript {
         self.seen = messages.len();
 
         let Some(me) = state.current_user() else {
-            return;
+            return news;
         };
         let channel = me.channel_id;
         let members: BTreeMap<u32, String> = state
@@ -85,6 +102,7 @@ impl Transcript {
             let time = now.with_timezone(&Local);
             for (session, name) in &self.members {
                 if !members.contains_key(session) {
+                    news.left = true;
                     self.entries.push(Entry::Left {
                         name: name.clone(),
                         time,
@@ -93,6 +111,7 @@ impl Transcript {
             }
             for (session, name) in &members {
                 if !self.members.contains_key(session) {
+                    news.joined = true;
                     self.entries.push(Entry::Joined {
                         name: name.clone(),
                         time,
@@ -102,6 +121,7 @@ impl Transcript {
         }
         self.channel = Some(channel);
         self.members = members;
+        news
     }
 }
 
@@ -201,5 +221,32 @@ mod tests {
         s.users.remove(&2);
         t.sync(&s, now);
         assert_eq!(names(&t), ["kestrel: hi & hello", "-kestrel"]);
+    }
+
+    #[test]
+    fn news_is_what_others_did() {
+        let now = Utc::now();
+        let me = user(1, "me", 0, true);
+        let mut t = Transcript::default();
+        // Arriving is no news.
+        let news = t.sync(&state(&[me.clone(), user(2, "kestrel", 0, false)]), now);
+        assert_eq!(news, News::default());
+        let news = t.sync(&state(&[me.clone(), user(3, "wren", 0, false)]), now);
+        assert!(news.joined && news.left && !news.message);
+        // Your own message isn't news; someone else's is.
+        let mut s = state(&[me.clone(), user(3, "wren", 0, false)]);
+        let say = |actor| {
+            TextMessage::ChatTextMessage(ChatTextMessage {
+                timestamp: now,
+                actor: Some(actor),
+                session: vec![],
+                content: "hi".into(),
+            })
+        };
+        s.chat_messages.push(say(1));
+        assert_eq!(t.sync(&s, now), News::default());
+        s.chat_messages.push(say(3));
+        assert!(t.sync(&s, now).message);
+        assert_eq!(t.sync(&s, now), News::default());
     }
 }
