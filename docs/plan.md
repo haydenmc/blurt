@@ -72,7 +72,7 @@ Tray and portals need the host D-Bus session bus. Mount `${XDG_RUNTIME_DIR}/bus`
 
 ## Budgets (checked from milestone 3 on)
 - Client-side mouth-to-wire under about 20 ms with 10 ms frames, and jitter-buffer target plus playout under about 40 ms on a good network.
-- Idle CPU under 1.5% while connected and silent (relaxed from 1% on 2026-11-14 after measuring full AEC/NS/AGC on PipeWire at about 1.7%). RSS with the window closed (tray only) aims for under 40 MB. Release binary under about 20 MB (raised from 15 MB to fit bundled fonts and, later, wgpu).
+- Idle CPU under 1.5% while connected and silent (relaxed from 1% on 2026-11-14 after measuring full AEC/NS/AGC on PipeWire at about 1.7%). RSS with the window closed (tray only) aims for under 40 MB. Release binary under about 21 MB (raised from 15 MB to fit bundled fonts and wgpu, then to 21 MB on 2026-11-15 for the tray, keeping speed over size in hot code).
 
 ## Verification
 - `cargo test --workspace`: crypt vectors, codec round-trips, the state reducer against mumbo's fixtures, and the DSP chain on synthetic signals (an echo of a reference tone should drop by at least 20 dB after AEC, and a 1 kHz tone should come through the encode/decode round-trip).
