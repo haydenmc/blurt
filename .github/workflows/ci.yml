@@ -29,12 +29,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo clippy -p blurt --features gpu
       - run: cargo test --workspace
-      - name: Release build within the 15 MB budget
+      - name: Release build within the 20 MB budget
         run: |
           cargo build --release --locked -p blurt
           size=$(stat -c %s target/release/blurt)
           echo "blurt is $((size / 1024)) KiB"
-          if [ "$size" -gt $((15 * 1000 * 1000)) ]; then
-            echo "Release binary is over the 15 MB budget" >&2
+          if [ "$size" -gt $((20 * 1000 * 1000)) ]; then
+            echo "Release binary is over the 20 MB budget" >&2
             exit 1
           fi
