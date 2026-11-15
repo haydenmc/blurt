@@ -18,3 +18,16 @@ strip = true
 [profile.dev.package."*"]
 # Optimize dependencies in dev so audio DSP and rendering run at usable speed.
 opt-level = 2
+
+# The GPU stack is large and not hot (blurt draws little); optimize it for
+# size so rich visuals fit the binary budget. Audio DSP keeps opt-level 3.
+[profile.release.package.naga]
+opt-level = "s"
+[profile.release.package.wgpu-core]
+opt-level = "s"
+[profile.release.package.wgpu-hal]
+opt-level = "s"
+[profile.release.package.wgpu]
+opt-level = "s"
+[profile.release.package.iced_wgpu]
+opt-level = "s"

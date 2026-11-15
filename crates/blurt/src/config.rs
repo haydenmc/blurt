@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use mumble_protocol::client::{ClientIdentity, Fingerprint};
 use serde::{Deserialize, Serialize};
 
+use crate::rich::RichVisuals;
 use crate::theme::{Accent, Mode};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28,6 +29,8 @@ pub struct Appearance {
     pub accent: Accent,
     /// Stops continuous animation (meters, glow); state changes still show.
     pub reduce_motion: bool,
+    /// Draw with the GPU, for the room glow. Takes effect at startup.
+    pub rich_visuals: RichVisuals,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

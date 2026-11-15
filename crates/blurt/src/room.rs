@@ -23,6 +23,12 @@ pub struct Room {
     pub transmitting: bool,
     /// Your smoothed mic level, as of the last tick or frame.
     pub mic_level: f32,
+    /// Everyone's smoothed playback level by session, for the room glow;
+    /// only kept up to date while it can be drawn.
+    pub levels: Vec<(u32, f32)>,
+    /// What's playing and what you're sending, by frequency band, for the
+    /// room glow; kept up to date like `levels`.
+    pub spectrum: blurt_audio::Spectrum,
     pub draft: String,
     pub talk: talk::TalkLog,
     pub transcript: transcript::Transcript,
@@ -47,6 +53,8 @@ impl Room {
             deafened: false,
             transmitting: false,
             mic_level: 0.0,
+            levels: Vec::new(),
+            spectrum: blurt_audio::Spectrum::default(),
             draft: String::new(),
             talk: talk::TalkLog::default(),
             transcript: transcript::Transcript::default(),
@@ -63,6 +71,44 @@ impl Room {
         self.state = state;
         self.transcript.sync(&self.state, chrono::Utc::now());
         self.observe_talking(now);
+    }
+
+    /// How loud each person in your channel is, 0 to 1, you included while
+    /// you're heard: what the room glow shows.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub fn loudness(&self) -> Vec<f32> {
+        let Some(me) = self.state.current_user() else {
+            return Vec::new();
+        };
+        let channel = me.channel_id;
+        let mut loudness: Vec<f32> = self
+            .levels
+            .iter()
+            .filter(|(session, _)| {
+                self.state
+                    .users
+                    .get(session)
+                    .is_some_and(|u| u.channel_id == channel && !u.is_me)
+            })
+            .map(|&(_, level)| crate::ui::meter::loudness(level))
+            .collect();
+        if self.live() {
+            loudness.push(crate::ui::meter::loudness(self.mic_level));
+        }
+        loudness.retain(|&l| l > 0.0);
+        loudness
+    }
+
+    /// How many in your channel are talking audibly, you included.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub fn talkers(&self) -> usize {
+        self.loudness().iter().filter(|&&l| l > 0.08).count()
+    }
+
+    /// Whether there's any sound for the room glow to show.
+    pub fn sounding(&self) -> bool {
+        let any = |bands: &[f32]| bands.iter().any(|&b| b > 0.0);
+        any(&self.spectrum.playback) || (self.live() && any(&self.spectrum.mic))
     }
 
     /// Whether you're actually being heard.

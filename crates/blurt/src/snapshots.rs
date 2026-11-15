@@ -151,7 +151,9 @@ fn save(dir: &std::path::Path, name: &str, t: Tokens, size: Size, view: Element<
     let path = dir.join(name);
     // `matches_image` keeps an existing picture; start fresh each run. It
     // names files after the renderer.
-    let _ = std::fs::remove_file(dir.join(format!("{name}-tiny-skia.png")));
+    for renderer in ["tiny-skia", "wgpu"] {
+        let _ = std::fs::remove_file(dir.join(format!("{name}-{renderer}.png")));
+    }
     snapshot.matches_image(&path).expect("write snapshot");
 }
 
@@ -167,6 +169,10 @@ fn snapshots() {
     let later = now + Duration::from_secs(1);
     room.transmitting = true;
     room.mic_level = 0.2;
+    // A voice in the bands (lowest first), as the engine reports it.
+    room.spectrum.playback = [0.05, 0.09, 0.07, 0.04, 0.025, 0.014, 0.008, 0.004];
+    room.spectrum.mic = [0.03, 0.05, 0.06, 0.03, 0.02, 0.012, 0.006, 0.002];
+    room.levels = vec![(2, 0.15)];
     room.observe_talking(now);
 
     let config = Config {
@@ -200,6 +206,7 @@ fn snapshots() {
                 layout,
                 reduce_motion: false,
                 volume: 0.8,
+                glow: true,
             };
             save(
                 &dir,
@@ -221,6 +228,7 @@ fn snapshots() {
                     layout: Layout::Compact,
                     reduce_motion: false,
                     volume: 0.8,
+                    glow: true,
                 };
                 save(
                     &dir,
@@ -249,7 +257,7 @@ fn snapshots() {
                 "settings",
                 t,
                 size,
-                window(t, nav(Page::Settings), pages::settings(t, &config)),
+                window(t, nav(Page::Settings), pages::settings(t, &config, false)),
             );
         }
     }

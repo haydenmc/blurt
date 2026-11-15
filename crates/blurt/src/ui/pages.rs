@@ -10,6 +10,7 @@ use mumble_protocol::client::Fingerprint;
 use super::{label, underline};
 use crate::Message;
 use crate::config::{self, Config, Server};
+use crate::rich::{self, RichVisuals};
 use crate::theme::{self, Accent, Mode, Tokens, size};
 
 /// The add/edit server form.
@@ -284,7 +285,9 @@ pub fn trust<'a>(
     )
 }
 
-pub fn settings<'a>(t: Tokens, config: &'a Config) -> Element<'a, Message> {
+/// `rich_now`: whether this run asked for the GPU renderer, to say when a
+/// changed rich visuals setting waits for a restart.
+pub fn settings<'a>(t: Tokens, config: &'a Config, rich_now: bool) -> Element<'a, Message> {
     let a = &config.appearance;
     let choice = |words: &'static str, active: bool, message: Message| {
         button(text(words).size(20).font(theme::display(if active {
@@ -366,10 +369,56 @@ pub fn settings<'a>(t: Tokens, config: &'a Config) -> Element<'a, Message> {
                 .spacing(24)
                 .into()
             ),
+            column![
+                section(
+                    "rich visuals",
+                    row![
+                        choice(
+                            "auto",
+                            a.rich_visuals == RichVisuals::Auto,
+                            Message::SetRichVisuals(RichVisuals::Auto)
+                        ),
+                        choice(
+                            "on",
+                            a.rich_visuals == RichVisuals::On,
+                            Message::SetRichVisuals(RichVisuals::On)
+                        ),
+                        choice(
+                            "off",
+                            a.rich_visuals == RichVisuals::Off,
+                            Message::SetRichVisuals(RichVisuals::Off)
+                        ),
+                    ]
+                    .spacing(24)
+                    .into()
+                ),
+                body(t, rich_note(a.rich_visuals, rich_now)),
+            ]
+            .spacing(6),
             body(t, "the accent only ever lights up for live audio."),
         ]
         .spacing(28),
     )
+}
+
+/// What the rich visuals setting does here, and whether it waits for a
+/// restart.
+fn rich_note(setting: RichVisuals, now: bool) -> String {
+    if !cfg!(feature = "gpu") {
+        return "this build of blurt draws with the cpu only.".into();
+    }
+    let mut note = String::from("draws with the gpu, for the room glow behind the controls.");
+    if setting == RichVisuals::Auto {
+        note += if rich::capable() {
+            " auto: on here."
+        } else {
+            " auto: off here (it needs 32 gb of memory and a gpu)."
+        };
+    }
+    if setting.wanted() != now {
+        note += " restart blurt to apply.";
+    }
+    note
 }
 
 /// Shown above whatever page is up, until dismissed.

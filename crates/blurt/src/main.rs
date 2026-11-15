@@ -3,6 +3,7 @@
 mod config;
 mod html;
 mod icons;
+mod rich;
 mod room;
 mod session;
 #[cfg(test)]
@@ -30,6 +31,12 @@ use ui::{Layout, Page, Pivot, chrome};
 
 fn main() -> iced::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // The renderer is picked when iced starts, from the setting as saved.
+    let rich = config::dir()
+        .and_then(|dir| config::load(&dir).ok())
+        .map(|c| c.appearance.rich_visuals)
+        .unwrap_or_default();
+    rich::choose_renderer(rich.wanted());
     // A daemon outlives its windows, which is how close-to-tray will work.
     // Until the tray exists (milestone 5), closing the last window quits.
     iced::daemon(Blurt::new, Blurt::update, Blurt::view)
@@ -62,6 +69,9 @@ struct Blurt {
     layout: Layout,
     /// When the layout last switched, to fade the new one in.
     reflowed: Option<Instant>,
+    /// Whether the GPU renderer was asked for at startup; the glow can only
+    /// show then (and if the GPU started).
+    rich: bool,
 }
 
 enum Screen {
@@ -133,6 +143,7 @@ pub enum Message {
     SetTheme(Mode),
     SetAccent(Accent),
     SetReduceMotion(bool),
+    SetRichVisuals(rich::RichVisuals),
 }
 
 impl Blurt {
@@ -164,6 +175,8 @@ impl Blurt {
             width: WINDOW.width,
             layout: Layout::for_width(WINDOW.width),
             reflowed: None,
+            // As `main` chose (or the user's own ICED_BACKEND).
+            rich: std::env::var("ICED_BACKEND").map_or(true, |b| !b.starts_with("tiny-skia")),
         };
         (app, open.map(Message::WindowOpened))
     }
@@ -405,10 +418,22 @@ impl Blurt {
                     c.room.mic_level = stats.mic_level;
                     c.room.observe_talking(now);
                 }
+                // Between frames, notice when the glow needs to start.
+                if self.glow()
+                    && let Some(c) = self.connected()
+                {
+                    c.room.levels = c.session.engine.speaker_levels();
+                    c.room.spectrum = c.session.engine.spectrum();
+                }
             }
             Message::Frame => {
+                let glow = self.glow();
                 if let Some(c) = self.connected() {
                     c.room.mic_level = c.session.engine.stats().mic_level;
+                    if glow {
+                        c.room.levels = c.session.engine.speaker_levels();
+                        c.room.spectrum = c.session.engine.spectrum();
+                    }
                 }
             }
 
@@ -418,6 +443,10 @@ impl Blurt {
             }
             Message::SetAccent(accent) => {
                 self.config.appearance.accent = accent;
+                self.save();
+            }
+            Message::SetRichVisuals(rich) => {
+                self.config.appearance.rich_visuals = rich;
                 self.save();
             }
             Message::SetReduceMotion(reduce) => {
@@ -524,6 +553,15 @@ impl Blurt {
         }
     }
 
+    /// Whether the room glow can show: rich visuals asked for at startup,
+    /// the GPU running (as far as is known yet), and motion allowed.
+    fn glow(&self) -> bool {
+        cfg!(feature = "gpu")
+            && self.rich
+            && rich::renderer() != rich::Renderer::Cpu
+            && !self.reduce_motion()
+    }
+
     /// Whether anything on screen is moving, so frames are worth drawing.
     fn animating(&self, now: Instant) -> bool {
         let running =
@@ -537,6 +575,7 @@ impl Blurt {
         match &self.screen {
             Screen::Connected(c) => {
                 running(c.room.pivot_changed, theme::motion::PIVOT)
+                    || (self.glow() && self.page == Page::Voice && c.room.sounding())
                     || c.room.talking.values().any(|a| a.is_animating(now))
                     // Your meter moves while you talk.
                     || (self.page == Page::Voice && c.room.live())
@@ -565,8 +604,9 @@ impl Blurt {
                 layout: self.layout,
                 reduce_motion: self.reduce_motion(),
                 volume: self.config.audio.output_volume,
+                glow: self.glow(),
             }),
-            (_, Page::Settings) => pages::settings(t, &self.config),
+            (_, Page::Settings) => pages::settings(t, &self.config, self.rich),
             (Screen::Connecting { server, .. }, _) => pages::connecting(t, server),
             (
                 Screen::Trust {
