@@ -216,15 +216,9 @@ fn compact<'a>(v: &Voice<'a>) -> Element<'a, Message> {
 /// only; nothing otherwise).
 fn room_glow<'a>(v: &Voice<'a>) -> Element<'a, Message> {
     #[cfg(feature = "gpu")]
-    if v.glow && v.room.sounding() {
+    if v.glow && v.room.glow.visible() {
         let compact = v.layout == Layout::Compact;
-        let params = super::glow::params(
-            &v.room.spectrum,
-            v.room.live(),
-            v.room.talkers(),
-            compact,
-            v.t,
-        );
+        let params = super::glow::params(&v.room.glow, compact, v.t);
         if params.visible() {
             let height = if compact { 90.0 } else { 140.0 };
             return container(super::glow::glow(params, height))

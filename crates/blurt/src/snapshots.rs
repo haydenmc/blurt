@@ -170,10 +170,17 @@ fn snapshots() {
     room.transmitting = true;
     room.mic_level = 0.2;
     // A voice in the bands (lowest first), as the engine reports it.
-    room.spectrum.playback = [0.05, 0.09, 0.07, 0.04, 0.025, 0.014, 0.008, 0.004];
-    room.spectrum.mic = [0.03, 0.05, 0.06, 0.03, 0.02, 0.012, 0.006, 0.002];
+    room.spectrum.playback = [
+        0.03, 0.05, 0.08, 0.09, 0.07, 0.06, 0.045, 0.035, 0.028, 0.02, 0.016, 0.012, 0.009, 0.006,
+        0.004, 0.002,
+    ];
+    room.spectrum.mic = room.spectrum.playback.map(|b| b * 0.6);
     room.levels = vec![(2, 0.15)];
     room.observe_talking(now);
+    // Settled on that sound.
+    for ms in (0..1000).step_by(16) {
+        room.step_glow(now + Duration::from_millis(ms));
+    }
 
     let config = Config {
         servers: vec![

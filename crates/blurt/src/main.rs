@@ -424,6 +424,7 @@ impl Blurt {
                 {
                     c.room.levels = c.session.engine.speaker_levels();
                     c.room.spectrum = c.session.engine.spectrum();
+                    c.room.step_glow(now);
                 }
             }
             Message::Frame => {
@@ -433,6 +434,7 @@ impl Blurt {
                     if glow {
                         c.room.levels = c.session.engine.speaker_levels();
                         c.room.spectrum = c.session.engine.spectrum();
+                        c.room.step_glow(now);
                     }
                 }
             }
@@ -575,7 +577,9 @@ impl Blurt {
         match &self.screen {
             Screen::Connected(c) => {
                 running(c.room.pivot_changed, theme::motion::PIVOT)
-                    || (self.glow() && self.page == Page::Voice && c.room.sounding())
+                    || (self.glow()
+                        && self.page == Page::Voice
+                        && (c.room.sounding() || c.room.glow.visible()))
                     || c.room.talking.values().any(|a| a.is_animating(now))
                     // Your meter moves while you talk.
                     || (self.page == Page::Voice && c.room.live())

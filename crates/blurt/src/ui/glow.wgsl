@@ -7,9 +7,8 @@ struct Glow {
     size_rise: vec4<f32>,
     a1: vec4<f32>,
     a2: vec4<f32>,
-    // The eight bands, lowest first, 0 to 1.
-    low: vec4<f32>,
-    high: vec4<f32>,
+    // The sixteen bands, lowest first, 0 to 1: four to a vec4.
+    bands: array<vec4<f32>, 4>,
 };
 
 @group(0) @binding(0) var<uniform> glow: Glow;
@@ -30,15 +29,14 @@ fn vs_main(@builtin(vertex_index) i: u32) -> Varying {
     return out;
 }
 
+const LAST: i32 = 15;
+
 fn band(i: i32) -> f32 {
-    let j = clamp(i, 0, 7);
-    if (j < 4) {
-        return glow.low[j];
-    }
-    return glow.high[j - 4];
+    let j = clamp(i, 0, LAST);
+    return glow.bands[j / 4][j % 4];
 }
 
-// The bands as a smooth curve over 0 (lowest) to 7 (highest):
+// The bands as a smooth curve over 0 (lowest) to LAST (highest):
 // Catmull-Rom through the band levels.
 fn curve(x: f32) -> f32 {
     let i = i32(floor(x));
@@ -62,7 +60,7 @@ fn fs_main(in: Varying) -> @location(0) vec4<f32> {
 
     // Mirrored: 0 at either edge, 1 in the middle.
     let towards_middle = 1.0 - abs(in.uv.x * 2.0 - 1.0);
-    let height = curve(towards_middle * 7.0) * rise;
+    let height = curve(towards_middle * f32(LAST)) * rise;
     if (height < 0.5) {
         discard;
     }

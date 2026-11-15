@@ -140,8 +140,11 @@ struct Primitive {
     size: Size,
 }
 
-/// The shader's uniforms: five vec4s, as the WGSL `Glow` struct.
-fn uniforms(p: &Primitive, linear: bool) -> [f32; 20] {
+/// Floats in the shader's uniforms: three vec4s, then the bands.
+const UNIFORMS: usize = 12 + BANDS;
+
+/// The shader's uniforms, as the WGSL `Glow` struct.
+fn uniforms(p: &Primitive, linear: bool) -> [f32; UNIFORMS] {
     let color = |c: Color| {
         let [r, g, b, _] = if linear {
             c.into_linear()
@@ -150,31 +153,12 @@ fn uniforms(p: &Primitive, linear: bool) -> [f32; 20] {
         };
         [r, g, b, 1.0]
     };
-    let [a1r, a1g, a1b, a1a] = color(p.params.a1);
-    let [a2r, a2g, a2b, a2a] = color(p.params.a2);
-    let [b0, b1, b2, b3, b4, b5, b6, b7] = p.params.bands;
-    [
-        p.size.width,
-        p.size.height,
-        p.params.rise,
-        p.params.opacity,
-        a1r,
-        a1g,
-        a1b,
-        a1a,
-        a2r,
-        a2g,
-        a2b,
-        a2a,
-        b0,
-        b1,
-        b2,
-        b3,
-        b4,
-        b5,
-        b6,
-        b7,
-    ]
+    let mut out = [0.0; UNIFORMS];
+    out[..4].copy_from_slice(&[p.size.width, p.size.height, p.params.rise, p.params.opacity]);
+    out[4..8].copy_from_slice(&color(p.params.a1));
+    out[8..12].copy_from_slice(&color(p.params.a2));
+    out[12..].copy_from_slice(&p.params.bands);
+    out
 }
 
 impl shader::Primitive for Primitive {
@@ -225,7 +209,7 @@ impl shader::Pipeline for Pipeline {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("blurt glow uniforms"),
-            size: (20 * 4) as u64,
+            size: (UNIFORMS * 4) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -309,41 +293,21 @@ impl shader::Pipeline for Pipeline {
     }
 }
 
-/// The glow for your channel. `spectrum` is what's playing and what you're
-/// sending (only counted while you're heard: `live`); `talkers` is how many
-/// are talking, which sets, by spec, how high it may rise (about 60 px plus
-/// 18 per talker, up to four) and how opaque it gets (0.28 plus 0.08 per
-/// talker, capped so text above stays readable).
-pub fn params(
-    spectrum: &blurt_audio::Spectrum,
-    live: bool,
-    talkers: usize,
-    compact: bool,
-    t: crate::theme::Tokens,
-) -> Params {
-    let talkers = talkers.min(4);
+/// The glow for your channel, from its levels as shown. How many are
+/// talking sets how high it may rise (about 50 px plus 14 per talker, up
+/// to four) and how opaque it gets (0.2 plus 0.05 per talker, capped low
+/// so it stays in the background and text above stays readable).
+pub fn params(glow: &crate::room::GlowLevels, compact: bool, t: crate::theme::Tokens) -> Params {
+    let talkers = glow.talkers.min(4.0);
     let (rise, cap) = if compact {
-        (84.0, 0.4)
+        (70.0, 0.28)
     } else {
-        (60.0 + 18.0 * talkers as f32, 0.52)
+        (50.0 + 14.0 * talkers, 0.36)
     };
-    let bands = std::array::from_fn(|i| {
-        let mic = if live { spectrum.mic[i] } else { 0.0 };
-        let level = spectrum.playback[i].max(mic);
-        // Voices carry most of their energy low; tilt up 3 dB a band so
-        // the high bands, in the middle, move too.
-        let tilt = 2f32.powf(i as f32 * 0.5);
-        crate::ui::meter::loudness(level * tilt)
-    });
-    let sounding = |b: &[f32; BANDS]| b.iter().any(|&b| b > 0.0);
     Params {
-        bands,
+        bands: glow.bands,
         rise,
-        opacity: if sounding(&bands) {
-            (0.28 + 0.08 * talkers.max(1) as f32).min(cap)
-        } else {
-            0.0
-        },
+        opacity: (0.2 + 0.05 * talkers.max(1.0)).min(cap),
         a1: t.a1,
         a2: t.a2,
         additive: t.mode == crate::theme::Mode::Dark,
@@ -353,14 +317,14 @@ pub fn params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::room::GlowLevels;
     use crate::theme::{Accent, Mode, Tokens};
-    use blurt_audio::Spectrum;
 
-    fn spectrum(level: f32) -> Spectrum {
-        Spectrum {
-            playback: [level; BANDS],
-            mic: [0.0; BANDS],
-        }
+    fn levels(level: f32, talkers: f32) -> GlowLevels {
+        let mut glow = GlowLevels::default();
+        glow.bands = [level; BANDS];
+        glow.talkers = talkers;
+        glow
     }
 
     #[test]
@@ -379,45 +343,34 @@ mod tests {
             .iter()
             .find(|(_, t)| t.name.as_deref() == Some("Glow"))
             .expect("Glow struct");
-        assert_eq!(glow.1.inner.size(module.to_ctx()), 20 * 4);
+        assert_eq!(glow.1.inner.size(module.to_ctx()), UNIFORMS as u32 * 4);
     }
 
     #[test]
     fn silence_draws_nothing() {
         let t = Tokens::new(Mode::Dark, Accent::Zune);
-        assert!(!params(&Spectrum::default(), true, 0, false, t).visible());
+        assert!(!params(&GlowLevels::default(), false, t).visible());
     }
 
     #[test]
     fn more_talkers_rise_higher_but_opacity_is_capped() {
         let t = Tokens::new(Mode::Dark, Accent::Zune);
-        let one = params(&spectrum(0.1), false, 1, false, t);
-        let three = params(&spectrum(0.1), false, 3, false, t);
-        let many = params(&spectrum(0.1), false, 8, false, t);
+        let one = params(&levels(0.5, 1.0), false, t);
+        let three = params(&levels(0.5, 3.0), false, t);
+        let many = params(&levels(0.5, 8.0), false, t);
         assert!(one.visible());
         assert!(three.rise > one.rise);
-        assert_eq!(many.rise, 60.0 + 18.0 * 4.0);
-        assert_eq!(many.opacity, 0.52);
-        let compact = params(&spectrum(0.1), false, 8, true, t);
-        assert_eq!(compact.rise, 84.0);
-        assert_eq!(compact.opacity, 0.4);
-        assert!(many.bands.iter().all(|&b| b <= 1.0));
-    }
-
-    #[test]
-    fn your_voice_counts_only_while_heard() {
-        let t = Tokens::new(Mode::Dark, Accent::Zune);
-        let mine = Spectrum {
-            playback: [0.0; BANDS],
-            mic: [0.1; BANDS],
-        };
-        assert!(params(&mine, true, 1, false, t).visible());
-        assert!(!params(&mine, false, 0, false, t).visible());
+        assert!(three.opacity > one.opacity);
+        assert_eq!(many.rise, 50.0 + 14.0 * 4.0);
+        assert_eq!(many.opacity, 0.36);
+        let compact = params(&levels(0.5, 8.0), true, t);
+        assert_eq!(compact.rise, 70.0);
+        assert_eq!(compact.opacity, 0.28);
     }
 
     #[test]
     fn light_mode_paints_over() {
         let t = Tokens::new(Mode::Light, Accent::Zune);
-        assert!(!params(&spectrum(0.1), false, 1, false, t).additive);
+        assert!(!params(&levels(0.5, 1.0), false, t).additive);
     }
 }
