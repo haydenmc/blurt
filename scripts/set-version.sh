@@ -21,7 +21,12 @@ awk -v v="$version" '
 ' Cargo.lock > Cargo.lock.new
 mv Cargo.lock.new Cargo.lock
 
-if command -v cargo >/dev/null; then
-  cargo metadata --locked --offline --format-version 1 >/dev/null
+# Not cargo: it would need every crate downloaded, and the --locked builds
+# that follow check the lock anyway.
+stamped=$(grep -A1 -E '^name = "(blurt|blurt-audio|blurt-cli|blurt-platform)"$' Cargo.lock |
+  grep -cxF "version = \"$version\"" || true)
+if [ "$stamped" -ne 4 ]; then
+  echo "Expected 4 workspace crates in Cargo.lock at $version, found $stamped" >&2
+  exit 1
 fi
 echo "Version set to $version"
