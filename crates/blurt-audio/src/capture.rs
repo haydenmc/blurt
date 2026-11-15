@@ -37,7 +37,9 @@ const LOOKBACK_FRAMES: usize = 15;
 /// When to transmit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransmitMode {
-    /// When the voice detector hears speech with at least this probability.
+    /// When the voice detector hears speech with at least this probability,
+    /// or while push-to-talk is held (to be heard even when the detector
+    /// doubts you).
     VoiceActivity {
         threshold: f32,
     },
@@ -512,6 +514,9 @@ impl Capture {
         self.onset.update(level);
 
         let (wanted, hold, lookback) = match self.mode {
+            // Held, as push-to-talk; the detector's hold still bridges a
+            // release mid-sentence.
+            TransmitMode::VoiceActivity { .. } if talk => (true, VOICE_HOLD_FRAMES, PREROLL_FRAMES),
             TransmitMode::VoiceActivity { threshold } => (
                 speech >= threshold && above_floor,
                 VOICE_HOLD_FRAMES,
@@ -693,6 +698,28 @@ mod tests {
         assert_eq!(numbers, (3..15).collect::<Vec<_>>());
         assert!(sent.last().unwrap().2, "ends with a terminator");
         assert_eq!(sent.iter().filter(|s| s.2).count(), 1);
+    }
+
+    #[test]
+    fn push_to_talk_also_works_in_voice_activity_mode() {
+        let quiet = [0.0; FRAME_SAMPLES];
+        // Silence the detector would never pass...
+        let mut unheld = capture(TransmitMode::default(), 1);
+        let sent = sink();
+        let mut out = sent;
+        for _ in 0..50 {
+            unheld.capture(&quiet, false, false, &mut out);
+        }
+        assert!(sent.lock().unwrap().0.is_empty());
+        // ...is sent while push-to-talk is held.
+        let mut held = capture(TransmitMode::default(), 1);
+        let sent = sink();
+        let mut out = sent;
+        for i in 0..10 {
+            held.capture(&quiet, i < 5, false, &mut out);
+        }
+        let sent = &sent.lock().unwrap().0;
+        assert!(sent.len() >= 5, "sent {} frames", sent.len());
     }
 
     #[test]
