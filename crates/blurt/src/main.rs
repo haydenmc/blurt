@@ -415,6 +415,11 @@ impl Blurt {
                 // Opened again from the tray: at the size it opens at.
                 self.width = WINDOW.width;
                 self.layout = Layout::for_width(WINDOW.width);
+                // iced shows a new window only once it's built, which on
+                // Windows doesn't bring it forward (opened from the tray,
+                // it stayed behind): ask for that once it's up.
+                #[cfg(windows)]
+                return window::gain_focus(id);
             }
             Message::WindowClosed(id) => {
                 if self.window == Some(id) {
