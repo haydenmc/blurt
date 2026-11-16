@@ -75,7 +75,8 @@ fn log_file() -> Option<std::fs::File> {
 
 /// Opens blurt's window: at startup, and again from the tray. Its id
 /// counts as the window straight away, before it has opened, so nothing
-/// that arrives meanwhile (on Windows, the tray failing) opens a second.
+/// that arrives meanwhile (such as the tray failing, which is instant
+/// without one) opens a second.
 fn open_window() -> (window::Id, Task<Message>) {
     let (id, open) = window::open(window::Settings {
         size: WINDOW,
@@ -414,6 +415,11 @@ impl Blurt {
                 // Opened again from the tray: at the size it opens at.
                 self.width = WINDOW.width;
                 self.layout = Layout::for_width(WINDOW.width);
+                // iced shows a new window only once it's built, which on
+                // Windows doesn't bring it forward (opened from the tray,
+                // it stayed behind): ask for that once it's up.
+                #[cfg(windows)]
+                return window::gain_focus(id);
             }
             Message::WindowClosed(id) => {
                 if self.window == Some(id) {

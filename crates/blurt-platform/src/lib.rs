@@ -6,6 +6,9 @@
 //! desktop (KDE, GNOME 48+, Hyprland...) owns the key bindings: it asks the
 //! user to approve them and lets them rebind. The tray icon is a
 //! StatusNotifierItem (through ksni). Both share one D-Bus library (zbus).
+//!
+//! Windows has the tray, in the notification area (through windows-sys).
+//! Global hotkeys there are still to come.
 
 pub mod hotkeys;
 pub mod tray;

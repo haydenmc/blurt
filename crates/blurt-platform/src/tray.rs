@@ -8,7 +8,7 @@
 //!
 //! Linux uses StatusNotifierItem over D-Bus (through ksni): KDE Plasma,
 //! and most other desktops with a tray (GNOME needs the AppIndicator
-//! extension).
+//! extension). Windows uses the notification area (`Shell_NotifyIconW`).
 
 use futures_channel::mpsc;
 use futures_util::{Stream, StreamExt, stream};
@@ -82,7 +82,7 @@ pub fn listen(app_id: &str, state: State) -> impl Stream<Item = Event> + use<> {
 
 /// The menu's items, platform-neutral, so they can be tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 enum Item {
     Button {
         label: &'static str,
@@ -97,7 +97,7 @@ enum Item {
     Separator,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn menu(state: &State) -> Vec<Item> {
     vec![
         Item::Button {
@@ -129,6 +129,77 @@ fn menu(state: &State) -> Vec<Item> {
         },
     ]
 }
+
+/// Of the icon's sizes, the one to show at `size` pixels: the smallest
+/// that's big enough, or else the biggest there is.
+#[cfg(any(windows, test))]
+fn pick(images: &[Image], size: u32) -> Option<&Image> {
+    images
+        .iter()
+        .filter(|image| image.width >= size)
+        .min_by_key(|image| image.width)
+        .or_else(|| images.iter().max_by_key(|image| image.width))
+}
+
+/// `image`'s pixels as Windows takes them: B, G, R, A bytes.
+#[cfg(any(windows, test))]
+fn bgra(image: &Image) -> Vec<u8> {
+    image
+        .argb
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[a, r, g, b]| [b, g, r, a])
+        .collect()
+}
+
+/// The tooltip as Windows takes it: blurt's name over `status`, UTF-16,
+/// NUL-terminated in 128 units, cut short (between characters) to fit.
+#[cfg(any(windows, test))]
+fn tooltip(status: &str) -> [u16; 128] {
+    let text = if status.is_empty() {
+        "blurt".to_owned()
+    } else {
+        format!("blurt\n{status}")
+    };
+    let mut tip = [0; 128];
+    let mut len = 0;
+    for c in text.chars() {
+        let mut units = [0; 2];
+        let units = c.encode_utf16(&mut units);
+        if len + units.len() > tip.len() - 1 {
+            break;
+        }
+        tip[len..len + units.len()].copy_from_slice(units);
+        len += units.len();
+    }
+    tip
+}
+
+/// Tells a click from the second click of a double-click, which Windows
+/// reports as another click: one within `interval` of the last is
+/// ignored, so a double-click toggles the window once, not twice.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, Default)]
+struct Clicks {
+    last: Option<std::time::Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl Clicks {
+    fn is_new(&mut self, now: std::time::Instant, interval: std::time::Duration) -> bool {
+        let new = self
+            .last
+            .is_none_or(|last| now.saturating_duration_since(last) >= interval);
+        self.last = Some(now);
+        new
+    }
+}
+
+#[cfg(windows)]
+mod win32;
+#[cfg(windows)]
+use win32 as imp;
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -259,7 +330,7 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 mod imp {
     use futures_channel::mpsc;
 
@@ -316,5 +387,70 @@ mod tests {
             labels(&deafened),
             ["Hide blurt", "-", "Mute ✓", "Deafen ✓", "-", "Quit"]
         );
+    }
+
+    fn square(size: u32) -> Image {
+        Image {
+            width: size,
+            height: size,
+            argb: vec![0; (size * size * 4) as usize],
+        }
+    }
+
+    #[test]
+    fn picks_the_smallest_big_enough_icon() {
+        let images: Vec<_> = [16, 24, 32, 64].into_iter().map(square).collect();
+        let at = |size| pick(&images, size).map(|image| image.width);
+        assert_eq!(at(16), Some(16));
+        assert_eq!(at(20), Some(24));
+        assert_eq!(at(40), Some(64));
+        assert_eq!(at(96), Some(64));
+        assert_eq!(pick(&[], 16), None);
+    }
+
+    #[test]
+    fn pixels_go_to_bgra() {
+        let image = Image {
+            width: 2,
+            height: 1,
+            argb: vec![0xff, 0x10, 0x20, 0x30, 0x80, 0x01, 0x02, 0x03],
+        };
+        assert_eq!(
+            bgra(&image),
+            [0x30, 0x20, 0x10, 0xff, 0x03, 0x02, 0x01, 0x80]
+        );
+    }
+
+    #[test]
+    fn a_double_click_is_one_click() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(500);
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut clicks = Clicks::default();
+        assert!(clicks.is_new(at(0), interval));
+        // The second click of a double-click.
+        assert!(!clicks.is_new(at(200), interval));
+        // A click a while after.
+        assert!(clicks.is_new(at(1000), interval));
+        assert!(clicks.is_new(at(1500), interval));
+    }
+
+    #[test]
+    fn tooltip_fits() {
+        let text = |tip: &[u16; 128]| {
+            let len = tip.iter().position(|&u| u == 0).unwrap();
+            String::from_utf16(&tip[..len]).unwrap()
+        };
+        assert_eq!(text(&tooltip("")), "blurt");
+        assert_eq!(text(&tooltip("home · lobby")), "blurt\nhome · lobby");
+        // Too long, ending in characters that take two units each: cut
+        // between them, leaving the NUL.
+        let long = "x".repeat(116) + &"🎧".repeat(10);
+        let tip = tooltip(&long);
+        assert_eq!(tip[127], 0);
+        let shown = text(&tip);
+        assert_eq!(shown.encode_utf16().count(), 126);
+        assert!(shown.ends_with('🎧'));
     }
 }
