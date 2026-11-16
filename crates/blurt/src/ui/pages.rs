@@ -447,12 +447,23 @@ fn shortcuts<'a>(t: Tokens, on: bool, hotkeys: &'a Hotkeys) -> Element<'a, Messa
         .spacing(4)
         .push(label("global shortcuts", t.fg2))
         .push(row![choice("off", !on), choice("on", on)].spacing(24));
+    if cfg!(windows) {
+        // Universal mute: always there, whatever the setting.
+        list = list.push(body(
+            t,
+            "while you're connected, win+alt+k and the taskbar's mic button mute blurt too.",
+        ));
+    }
     if !on {
         return list
             .push(body(
                 t,
-                "mute and deafen from anywhere, even while blurt isn't focused. \
-                 your desktop asks you to approve them.",
+                if cfg!(windows) {
+                    "mute and deafen from anywhere, even while blurt isn't focused."
+                } else {
+                    "mute and deafen from anywhere, even while blurt isn't focused. \
+                     your desktop asks you to approve them."
+                },
             ))
             .into();
     }
