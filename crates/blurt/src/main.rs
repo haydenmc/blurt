@@ -90,14 +90,11 @@ fn open_window() -> (window::Id, Task<Message>) {
     (id, open.map(Message::WindowOpened))
 }
 
-/// Windows shows a window's own icon in the taskbar and Alt+Tab. The
-/// tray's drawing of the app icon (blue, as when connected) serves, at
-/// its largest size.
+/// Windows shows a window's own icon in the taskbar and Alt+Tab: the app
+/// icon, as the tray draws it.
 #[cfg(windows)]
 fn window_icon() -> Option<window::Icon> {
-    let image = tray_icon::Look::Connected
-        .images(theme::Accent::default())
-        .last()?;
+    let image = tray_icon::app_icon(64);
     let rgba = image
         .argb
         .as_chunks::<4>()
