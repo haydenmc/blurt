@@ -21,7 +21,9 @@ libopus and libpipewire-0.3).
 On Windows, run `blurt-x86_64-windows-setup.exe` from the release (it installs
 for you only, no admin needed), or unzip `blurt-x86_64-windows.zip` anywhere.
 Neither is signed yet, so SmartScreen warns: choose *More info*, then *Run
-anyway*. Windows has the tray icon, but not global shortcuts yet.
+anyway*. Windows has the tray icon, and on Windows 11 the taskbar's mic
+button and Win+Alt+K mute blurt while you're connected. Global shortcuts
+aren't there yet.
 
 ## Status
 

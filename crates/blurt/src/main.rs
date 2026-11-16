@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blurt_audio::EngineConfig;
-use blurt_platform::{Action, hotkeys, tray};
+use blurt_platform::{Action, call, hotkeys, tray};
 use config::{Config, Server};
 use iced::widget::{self, column, container};
 use iced::{Element, Fill, Size, Subscription, Task, keyboard, window};
@@ -136,6 +136,16 @@ struct Blurt {
     /// starts a fresh listener.
     hotkeys_run: u32,
     tray: Tray,
+    call: Call,
+}
+
+/// The call as the system sees it (on Windows 11, the taskbar's microphone
+/// button), if it has a place for it.
+#[derive(Debug, Default)]
+struct Call {
+    controller: Option<call::Controller>,
+    /// What it was last told, so it's only told again on a change.
+    told: Option<call::State>,
 }
 
 /// The tray icon, if the desktop has a tray.
@@ -246,6 +256,7 @@ pub enum Message {
     SetNotificationSounds(bool),
     Hotkey(hotkeys::Event),
     Tray(tray::Event),
+    Call(call::Event),
     SetGlobalShortcuts(bool),
     ConfigureHotkeys,
 }
@@ -278,6 +289,7 @@ impl Blurt {
             hotkeys: Hotkeys::default(),
             hotkeys_run: 0,
             tray: Tray::default(),
+            call: Call::default(),
         };
         (app, open)
     }
@@ -319,6 +331,7 @@ impl Blurt {
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.step(message);
         self.show_in_tray();
+        self.show_in_call();
         task
     }
 
@@ -402,6 +415,26 @@ impl Blurt {
             window_open: shows.window_open,
         });
         self.tray.showing = Some(shows);
+    }
+
+    /// Tells the system about the call, if that has changed (or it asked).
+    fn show_in_call(&mut self) {
+        let Some(controller) = &self.call.controller else {
+            return;
+        };
+        let state = match &self.screen {
+            Screen::Connected(c) => call::State {
+                call: Some(c.room.server.label.clone()),
+                // Deafening mutes too.
+                muted: c.room.muted || c.room.deafened,
+            },
+            _ => call::State::default(),
+        };
+        if self.call.told.as_ref() == Some(&state) {
+            return;
+        }
+        controller.set(state.clone());
+        self.call.told = Some(state);
     }
 
     fn step(&mut self, message: Message) -> Task<Message> {
@@ -692,6 +725,26 @@ impl Blurt {
                 }
                 hotkeys::Event::Stopped => self.hotkeys = Hotkeys::default(),
             },
+            Message::Call(event) => match event {
+                call::Event::Ready(controller) => {
+                    self.call = Call {
+                        controller: Some(controller),
+                        told: None,
+                    };
+                }
+                call::Event::MuteRequested(mute) => {
+                    // The system waits for an answer, even if nothing
+                    // changes: tell it again either way.
+                    self.call.told = None;
+                    if let Some(c) = self.connected()
+                        && (c.room.muted || c.room.deafened) != mute
+                    {
+                        // Unmuting while deafened undeafens, as mute does.
+                        return self.act(Action::ToggleMute);
+                    }
+                }
+                call::Event::Unavailable(_) => self.call = Call::default(),
+            },
             Message::Tray(event) => match event {
                 tray::Event::Ready(controller) => {
                     self.tray.controller = Some(controller);
@@ -956,6 +1009,7 @@ impl Blurt {
             window::close_events().map(Message::WindowClosed),
             Subscription::run_with(APP_ID, |id| tray::listen(id, tray::State::default()))
                 .map(Message::Tray),
+            Subscription::run(call::listen).map(Message::Call),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
             // Text fields let Tab through; it moves between them.
             keyboard::listen().filter_map(|event| match event {

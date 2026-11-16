@@ -1,6 +1,6 @@
 [package]
 name = "blurt-platform"
-description = "Desktop integration for blurt: system tray and global hotkeys"
+description = "Desktop integration for blurt: system tray, global hotkeys and universal mute"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -27,4 +27,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
+] }
+# Universal mute (the taskbar's microphone button) is WinRT; the build
+# already has this crate through cpal.
+windows = { version = "0.62", default-features = false, features = [
+  "ApplicationModel_Calls",
+  "Foundation",
+  "Win32_System_WinRT",
 ] }
