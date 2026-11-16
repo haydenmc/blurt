@@ -176,6 +176,26 @@ fn tooltip(status: &str) -> [u16; 128] {
     tip
 }
 
+/// Tells a click from the second click of a double-click, which Windows
+/// reports as another click: one within `interval` of the last is
+/// ignored, so a double-click toggles the window once, not twice.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, Default)]
+struct Clicks {
+    last: Option<std::time::Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl Clicks {
+    fn is_new(&mut self, now: std::time::Instant, interval: std::time::Duration) -> bool {
+        let new = self
+            .last
+            .is_none_or(|last| now.saturating_duration_since(last) >= interval);
+        self.last = Some(now);
+        new
+    }
+}
+
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
@@ -399,6 +419,21 @@ mod tests {
             bgra(&image),
             [0x30, 0x20, 0x10, 0xff, 0x03, 0x02, 0x01, 0x80]
         );
+    }
+
+    #[test]
+    fn a_double_click_is_one_click() {
+        use std::time::{Duration, Instant};
+        let interval = Duration::from_millis(500);
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut clicks = Clicks::default();
+        assert!(clicks.is_new(at(0), interval));
+        // The second click of a double-click.
+        assert!(!clicks.is_new(at(200), interval));
+        // A click a while after.
+        assert!(clicks.is_new(at(1000), interval));
+        assert!(clicks.is_new(at(1500), interval));
     }
 
     #[test]

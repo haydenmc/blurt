@@ -10,6 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt;
@@ -20,6 +21,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -34,7 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_DESTROY, WM_DISPLAYCHANGE, WM_NULL, WM_SETTINGCHANGE, WNDCLASSW, WS_OVERLAPPED,
 };
 
-use super::{Event, Item, State, bgra, menu, pick, tooltip};
+use super::{Clicks, Event, Item, State, bgra, menu, pick, tooltip};
 use crate::Action;
 
 /// The shell reports clicks on the icon with this.
@@ -97,6 +99,7 @@ struct Tray {
     image: RefCell<Option<super::Image>>,
     /// Taken down for good: blurt is quitting.
     gone: Cell<bool>,
+    clicks: Cell<Clicks>,
 }
 
 fn thread(
@@ -145,6 +148,7 @@ fn thread(
             icon: Cell::new(null_mut()),
             image: RefCell::new(None),
             gone: Cell::new(false),
+            clicks: Cell::new(Clicks::default()),
         }));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, tray as isize);
         if !(*tray).add() {
@@ -184,7 +188,8 @@ unsafe extern "system" fn window_proc(
             // NOTIFYICON_VERSION_4: the event in the low word of lParam,
             // and where to put a menu in wParam.
             match lparam as u32 & 0xffff {
-                NIN_SELECT | NIN_KEYSELECT => tray.send(Action::ShowWindow),
+                NIN_SELECT => tray.clicked(),
+                NIN_KEYSELECT => tray.send(Action::ShowWindow),
                 WM_CONTEXTMENU => {
                     let x = (wparam & 0xffff) as u16 as i16;
                     let y = ((wparam >> 16) & 0xffff) as u16 as i16;
@@ -225,6 +230,18 @@ unsafe extern "system" fn window_proc(
 impl Tray {
     fn send(&self, action: Action) {
         let _ = self.events.unbounded_send(Event::Action(action));
+    }
+
+    /// A click on the icon: shows or hides the window, unless it's the
+    /// second click of a double-click.
+    fn clicked(&self) {
+        let interval = Duration::from_millis(unsafe { GetDoubleClickTime() }.into());
+        let mut clicks = self.clicks.get();
+        let new = clicks.is_new(Instant::now(), interval);
+        self.clicks.set(clicks);
+        if new {
+            self.send(Action::ShowWindow);
+        }
     }
 
     fn state(&self) -> State {
