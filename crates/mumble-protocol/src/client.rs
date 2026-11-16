@@ -539,6 +539,12 @@ async fn recv_udp(socket: Option<&UdpSocket>, buf: &mut [u8]) -> io::Result<usiz
     }
 }
 
+/// How long someone can go without sending voice before they're shown as no
+/// longer speaking, when no terminator says so. Voice normally arrives every
+/// 10-60ms while someone talks.
+const SPEAKING_TIMEOUT: Duration = Duration::from_millis(300);
+const SPEAKING_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
 async fn run(
     mut reader: impl Stream<Item = Result<ServerToClientMessage, io::Error>> + Unpin + Send + 'static,
     mut writer: impl Sink<crate::ClientToServerMessage, Error = io::Error> + Unpin + Send + 'static,
@@ -566,6 +572,9 @@ async fn run(
     // than its probe interval.
     let mut udp_tick = tokio::time::interval(Duration::from_millis(250));
     udp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Ends speaking for anyone whose terminator never arrived.
+    let mut speaking_tick = tokio::time::interval(SPEAKING_CHECK_INTERVAL);
+    speaking_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut udp_buf = vec![0u8; crate::udp::MAX_DATAGRAM];
     let epoch = Instant::now();
 
@@ -685,6 +694,13 @@ async fn run(
                 } else {
                     log::info!("Server channel closed, disconnecting");
                     break; // Channel closed, disconnect
+                }
+            }
+            _ = speaking_tick.tick() => {
+                let event = state.lock().unwrap().expire_speaking(Instant::now(), SPEAKING_TIMEOUT);
+                if let Some(event) = event {
+                    // Only fails if nobody is listening.
+                    let _ = events_tx.send(event);
                 }
             }
             _ = ping_interval.tick() => {
