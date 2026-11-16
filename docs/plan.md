@@ -45,7 +45,8 @@ Threads: the cpal input callback, the cpal output callback, and one **DSP thread
 - Traits: `Tray { set_state(muted, deafened, talking); events() }` and `Hotkeys { bind(Action, Trigger); events() }`, where `Action` is Mute, Deafen, PushToTalk, or ShowWindow.
 - **Linux tray:** `ksni` (StatusNotifierItem over D-Bus, pure Rust through zbus). Menu: Show/Hide, Mute, Deafen, Quit. The icon changes with mute/deafen state.
 - **Linux global hotkeys:** the XDG **GlobalShortcuts portal** through `ashpd` (KDE, GNOME 48+, Hyprland). The compositor lets the user approve or rebind the shortcuts, and we get press and release events, so PTT works. The X11 fallback is the `global-hotkey` crate. When neither is available, the settings screen shows a CLI hint: `blurt --toggle-mute` sends to the running instance over D-Bus, so users can bind it in their compositor config.
-- Later, Windows/macOS: `tray-icon` + `global-hotkey` (the `cfg` backends are stubbed now so the traits don't leak Linux details).
+- **Windows tray:** the notification area (`Shell_NotifyIconW`) through `windows-sys`, which the build already has, on a thread of its own with a hidden window. Same icon, tooltip and menu as on Linux; the icon comes back when Explorer restarts.
+- Later: Windows global hotkeys, and macOS (the `cfg` backends are stubbed so the traits don't leak platform details).
 
 ### 4. blurt (iced app)
 - Uses **`iced::daemon`**. Closing the window destroys it (freeing GPU and surface memory) while the process keeps running in the tray; "Show" opens a new window. This is what keeps the footprint small while minimized.

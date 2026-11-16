@@ -75,7 +75,8 @@ fn log_file() -> Option<std::fs::File> {
 
 /// Opens blurt's window: at startup, and again from the tray. Its id
 /// counts as the window straight away, before it has opened, so nothing
-/// that arrives meanwhile (on Windows, the tray failing) opens a second.
+/// that arrives meanwhile (such as the tray failing, which is instant
+/// without one) opens a second.
 fn open_window() -> (window::Id, Task<Message>) {
     let (id, open) = window::open(window::Settings {
         size: WINDOW,

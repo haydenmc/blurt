@@ -48,6 +48,11 @@ impl Look {
     }
 }
 
+// Windows asks for its small icon size times the display scale (125%:
+// 20, 150%: 24, ...): drawn at each, it never scales one itself.
+#[cfg(windows)]
+const SIZES: [u32; 7] = [16, 20, 24, 32, 40, 48, 64];
+#[cfg(not(windows))]
 const SIZES: [u32; 4] = [16, 22, 32, 64];
 
 /// The app icon's design grid.
@@ -223,6 +228,13 @@ mod tests {
         image.argb[i..i + 4].try_into().unwrap()
     }
 
+    /// The 64 px icon, the largest.
+    fn largest(look: Look, accent: Accent) -> &'static Image {
+        let image = look.images(accent).last().unwrap();
+        assert_eq!(image.width, 64);
+        image
+    }
+
     /// Writes each look's 64 px icon as raw ARGB, for a look at them.
     #[test]
     #[ignore = "writes files; run with BLURT_SNAPSHOTS set"]
@@ -237,7 +249,7 @@ mod tests {
             Look::Muted,
             Look::Deafened,
         ] {
-            let image = &look.images(Accent::Zune)[3];
+            let image = largest(look, Accent::Zune);
             let path = std::path::Path::new(&dir).join(format!("tray-{look:?}.argb"));
             std::fs::write(path, &image.argb).unwrap();
         }
@@ -263,9 +275,9 @@ mod tests {
 
     #[test]
     fn colours_tell_the_state() {
-        let at = |look: Look| pixel(&look.images(Accent::Zune)[3], 10, 40);
+        let at = |look: Look| pixel(largest(look, Accent::Zune), 10, 40);
         // A corner is see-through; the bubble's left edge is solid.
-        assert_eq!(pixel(&Look::Connected.images(Accent::Zune)[3], 1, 1)[0], 0);
+        assert_eq!(pixel(largest(Look::Connected, Accent::Zune), 1, 1)[0], 0);
         let [a, r, _, b] = at(Look::Connected);
         assert_eq!(a, 255);
         assert!(b > r + 60, "blue: {:?}", at(Look::Connected));
@@ -279,7 +291,7 @@ mod tests {
             at(Look::Transmitting)
         );
         // Struck through: red on the diagonal.
-        let [_, r, g, _] = pixel(&Look::Muted.images(Accent::Zune)[3], 32, 32);
+        let [_, r, g, _] = pixel(largest(Look::Muted, Accent::Zune), 32, 32);
         assert!(r > 200 && g < 100, "red: {r} {g}");
         assert_eq!(Look::new(true, true, false, true), Look::Deafened);
         assert_eq!(Look::new(true, true, true, false), Look::Muted);

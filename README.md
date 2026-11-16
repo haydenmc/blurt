@@ -21,7 +21,7 @@ libopus and libpipewire-0.3).
 On Windows, run `blurt-x86_64-windows-setup.exe` from the release (it installs
 for you only, no admin needed), or unzip `blurt-x86_64-windows.zip` anywhere.
 Neither is signed yet, so SmartScreen warns: choose *More info*, then *Run
-anyway*. Windows doesn't have the tray icon or global shortcuts yet.
+anyway*. Windows has the tray icon, but not global shortcuts yet.
 
 ## Status
 
