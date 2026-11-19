@@ -4,7 +4,7 @@ A small, fast, native [Mumble](https://www.mumble.info/) client written in Rust.
 
 Priorities: speed, a small resource footprint, low-latency and clean audio
 (echo cancellation and noise suppression), and usability. Linux on Wayland
-comes first; Windows and macOS builds are planned later.
+comes first; Windows and macOS builds are available in GitHub releases.
 
 ## Install
 
@@ -24,6 +24,10 @@ Neither is signed yet, so SmartScreen warns: choose *More info*, then *Run
 anyway*. Windows has the tray icon, and on Windows 11 the taskbar's mic
 button and Win+Alt+K mute blurt while you're connected. Global shortcuts
 aren't there yet.
+
+On macOS, download the archive for your Mac (`x86_64` for Intel or `arm64`
+for Apple silicon), extract it, and run `blurt`. macOS packages are not signed
+or notarized yet.
 
 ## Status
 
@@ -78,6 +82,10 @@ The first build downloads Microsoft's CRT and Windows SDK (cargo-xwin;
 by using it you accept [their licence](https://go.microsoft.com/fwlink/?LinkId=2086102)).
 There's no MSIX package until releases are properly code-signed: with a
 self-signed certificate, testers would have to trust it as admin first.
+
+macOS builds run natively on Intel and Apple silicon runners by
+[`.github/workflows/macos.yml`](.github/workflows/macos.yml). Pushing a `v*`
+tag publishes both archives in the GitHub release.
 
 Changes to `crates/mumble-protocol` go back upstream to Mumbo; see
 [docs/upstream.md](docs/upstream.md) for the commit rules and the export script.

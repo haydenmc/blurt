@@ -1,0 +1,55 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: scripts/set-version.sh "$GITHUB_REF_NAME"
+      - name: Install system dependencies
+        run: |
+          brew install pkg-config opus
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.target }}
+      - name: Clippy (macOS)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo clippy --locked -p blurt --target "${{ matrix.target }}" --no-default-features --features gpu
+      - name: Build (macOS)
+        run: cargo build --release --locked -p blurt --target "${{ matrix.target }}" --no-default-features --features gpu
+      - name: Package
+        run: |
+          dir="blurt-$GITHUB_REF_NAME-${{ matrix.arch }}-macos"
+          mkdir -p "$dir"
+          cp "target/${{ matrix.target }}/release/blurt" "$dir"/
+          cp LICENSE README.md "$dir"/
+          tar -czf "blurt-${{ matrix.arch }}-macos.tar.gz" "$dir"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: blurt-${{ matrix.arch }}-macos.tar.gz
